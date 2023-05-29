@@ -1,7 +1,16 @@
 [package]
 name = "cot_publisher"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 edition = "2021"
+authors = ["Martyn P <martyn@datasync.dev>"]
+license = "MIT"
+description = """
+Cursor On Target (COT) Publisher for multicast or TakServer Data Stream
+"""
+homepage = "https://github.com/martynp/cot_publisher"
+documentation = "https://github.com/martynp/cot_publisher"
+repository = "https://github.com/martynp/cot_publisher"
+readme = "readme.md"
 
 [dependencies]
 openssl = "0.10"

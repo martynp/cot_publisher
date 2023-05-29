@@ -1,5 +1,5 @@
 
-A Cursor-On-Target generator for multicast and streaming data interfaces (TakServer).
+A Rust Cursor-On-Target generator for multicast and streaming data interfaces (TakServer).
 
 # TakServer Setup
 

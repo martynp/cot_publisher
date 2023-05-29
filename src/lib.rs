@@ -147,7 +147,7 @@ impl CotPublisher {
     }
 
     pub fn set_position(&mut self, lat: f64, lng: f64) {
-        if let Some(mut pos) = self.position.as_mut() {
+        if let Some(pos) = self.position.as_mut() {
             pos.lat = lat;
             pos.lng = lng;
         } else {
