@@ -102,9 +102,6 @@ impl CotPublisher {
     }
 
     pub fn set_multicast(&mut self, multicast: Option<&str>) {
-        if let Some(socket) = self.multicast_socket.as_mut() {
-            drop(socket);
-        }
         self.multicast = multicast.map(|v| v.into());
         self.multicast_socket = None;
     }
@@ -114,16 +111,14 @@ impl CotPublisher {
             match socket {
                 StreamOptions::Tls(socket) => {
                     socket.shutdown().ok();
-                    drop(socket);
                 }
                 StreamOptions::Tcp(socket) => {
                     socket.shutdown(std::net::Shutdown::Both).ok();
-                    drop(socket);
                 }
             }
         }
-        self.tak_server = takserver.map(|v| (v.0.into(), v.1));
         self.tak_server_socket = None;
+        self.tak_server = takserver.map(|v| (v.0.into(), v.1));
     }
 
     pub fn set_tak_server_tls_settings(&mut self, settings: Option<TakServerSettings>) {
@@ -152,8 +147,8 @@ impl CotPublisher {
             pos.lng = lng;
         } else {
             self.position = Some(Position {
-                lat: lat,
-                lng: lng,
+                lat,
+                lng,
                 hae: 0.0,
                 ce: 0.0,
                 le: 0.0,
@@ -163,11 +158,11 @@ impl CotPublisher {
 
     pub fn set_position_extended(&mut self, lat: f64, lng: f64, hae: f64, ce: f64, le: f64) {
         self.position = Some(Position {
-            lat: lat,
-            lng: lng,
-            hae: hae,
-            ce: ce,
-            le: le,
+            lat,
+            lng,
+            hae,
+            ce,
+            le,
         });
     }
 
@@ -194,8 +189,7 @@ impl CotPublisher {
         }
 
         let message = self.create_cot();
-        let mut message_buffer = Vec::new();
-        message_buffer.reserve(message.encoded_len());
+        let mut message_buffer = Vec::with_capacity(message.encoded_len());
         message.encode(&mut message_buffer).unwrap();
 
         if let Some(multicast) = self.multicast.as_ref() {
@@ -219,21 +213,21 @@ impl CotPublisher {
                 match option {
                     StreamOptions::Tls(stream) => {
                         // Magic
-                        stream.write(&[0xbf]).ok();
+                        stream.write_all(&[0xbf]).ok();
                         stream
-                            .write(&CotPublisher::get_varint(message_buffer.len() as u32))
+                            .write_all(&CotPublisher::get_varint(message_buffer.len() as u32))
                             .ok();
                         // Message
-                        stream.write(&message_buffer).ok();
+                        stream.write_all(&message_buffer).ok();
                     }
                     StreamOptions::Tcp(stream) => {
                         // Magic
-                        stream.write(&[0xbf]).ok();
+                        stream.write_all(&[0xbf]).ok();
                         stream
-                            .write(&CotPublisher::get_varint(message_buffer.len() as u32))
+                            .write_all(&CotPublisher::get_varint(message_buffer.len() as u32))
                             .ok();
                         // Message
-                        stream.write(&message_buffer).ok();
+                        stream.write_all(&message_buffer).ok();
                     }
                 }
             }
@@ -241,17 +235,18 @@ impl CotPublisher {
     }
 
     fn multicast_connect() -> Option<UdpSocket> {
-        return match UdpSocket::bind("0.0.0.0:0") {
+        match UdpSocket::bind("0.0.0.0:0") {
             Ok(v) => Some(v),
             Err(e) => {
                 log::warn!("Unable to bind to {}: {}", "0.0.0.0:0", e);
                 None
             }
-        };
+        }
     }
 
     fn takserver_connect(&self) -> Option<StreamOptions> {
         if self.tak_server.is_none() {
+            log::info!("Attempted to connect to takserver but takserver settings are not set");
             return None;
         }
 
@@ -284,7 +279,7 @@ impl CotPublisher {
             },
         };
 
-        if server_settings.tls == false {
+        if !server_settings.tls {
             stream.write_all(PROTOCOL_CHANGE.as_bytes()).ok();
             return Some(StreamOptions::Tcp(stream));
         }
@@ -394,7 +389,7 @@ impl CotPublisher {
             }
         }
 
-        return Some(StreamOptions::Tls(stream));
+        Some(StreamOptions::Tls(stream))
     }
 
     fn create_cot(&self) -> tak_proto::TakMessage {
