@@ -2,13 +2,18 @@ use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslStream, SslVerifyMod
 use prost::Message;
 use std::{
     io::{Read, Write},
-    net::{TcpStream, UdpSocket},
+    net::{IpAddr, TcpStream, UdpSocket},
 };
+use url::Url;
 
+// Publishes COT messages to multicast or TCP targets
+#[derive(Default)]
 pub struct CotPublisher {
-    multicast: Option<String>,
-    tak_server: Option<(String, u16)>,
-    tak_server_settings: Option<TakServerSettings>,
+    multicast: Option<(IpAddr, u16)>,
+    tak_server_ip_address: Option<(IpAddr, u16)>,
+    tak_server_domain: Option<Url>,
+
+    tak_server_settings: Option<TakServerSetting>,
     stale_time_ms: u64,
     uid: String,
     contact: Option<Contact>,
@@ -16,6 +21,11 @@ pub struct CotPublisher {
     xml_detail: Option<String>,
     position: Option<Position>,
     precision_location: Option<PrecisionLocation>,
+
+    pub how: String,
+    pub access: String,
+    pub qos: String,
+    pub opex: String,
 
     /* Sockets */
     multicast_socket: Option<UdpSocket>,
@@ -39,7 +49,7 @@ pub mod tak_proto {
     ));
 }
 
-pub struct TakServerSettings {
+pub struct TakServerSetting {
     pub tls: bool,
     pub client_key: PEM,
     pub client_cert: PEM,
@@ -78,35 +88,52 @@ enum StreamOptions {
 }
 
 impl CotPublisher {
-    pub fn new(
-        uid: &str,
-        r#type: &str,
-        multicast: Option<&str>,
-        tak_server: Option<(&str, u16)>,
-    ) -> CotPublisher {
-        CotPublisher {
-            multicast: multicast.map(|v| v.into()),
-            tak_server: tak_server.map(|v| (v.0.into(), v.1)),
-            tak_server_settings: None,
-            xml_detail: None,
+    pub fn new(uid: &str, r#type: &str) -> Self {
+        Self {
             uid: uid.into(),
-            contact: None,
             r#type: r#type.into(),
-            position: None,
-            precision_location: None,
-            stale_time_ms: 60 * 1000, // 60 seconds
+            stale_time_ms: 60 * 1000,
+            how: "m-g".into(),
 
             multicast_socket: None,
             tak_server_socket: None,
+
+            ..Default::default()
         }
     }
 
-    pub fn set_multicast(&mut self, multicast: Option<&str>) {
-        self.multicast = multicast.map(|v| v.into());
+    /// Set multicast address
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - IpAddress to send multicast packet to, normally 239.2.3.1
+    /// * `port` - Port to use to send packet, normally 6969
+    ///
+    pub fn set_multicast(&mut self, address: IpAddr, port: u16) {
+        self.clear_multicast();
+        self.multicast = Some((address, port));
+    }
+
+    /// Clear the multicast destination details - disables multicast
+    ///
+    pub fn clear_multicast(&mut self) {
+        self.multicast = None;
         self.multicast_socket = None;
     }
 
-    pub fn set_takserver(&mut self, takserver: Option<(&str, u16)>) {
+    pub fn set_tak_server_domain(&mut self, domain: Url) {
+        self.clear_tak_server();
+        self.tak_server_ip_address = None;
+        self.tak_server_domain = Some(domain);
+    }
+
+    pub fn set_tak_server_ip_address(&mut self, address: IpAddr, port: u16) {
+        self.clear_tak_server();
+        self.tak_server_domain = None;
+        self.tak_server_ip_address = Some((address, port));
+    }
+
+    pub fn clear_tak_server(&mut self) {
         if let Some(socket) = self.tak_server_socket.as_mut() {
             match socket {
                 StreamOptions::Tls(socket) => {
@@ -117,11 +144,12 @@ impl CotPublisher {
                 }
             }
         }
+
+        self.tak_server_ip_address = None;
         self.tak_server_socket = None;
-        self.tak_server = takserver.map(|v| (v.0.into(), v.1));
     }
 
-    pub fn set_tak_server_tls_settings(&mut self, settings: Option<TakServerSettings>) {
+    pub fn set_tak_server_tls_settings(&mut self, settings: Option<TakServerSetting>) {
         self.tak_server_settings = settings
     }
 
@@ -179,11 +207,11 @@ impl CotPublisher {
     }
 
     pub fn connect(&mut self) {
-        self.tak_server_socket = self.takserver_connect();
+        self.tak_server_socket = self.tak_server_connect();
     }
 
     pub fn publish(&mut self) {
-        if self.multicast.is_none() && self.tak_server.is_none() {
+        if self.multicast.is_none() && self.tak_server_ip_address.is_none() {
             // Nothing to do
             return;
         }
@@ -200,13 +228,13 @@ impl CotPublisher {
             if let Some(socket) = self.multicast_socket.as_mut() {
                 let mut buffer = vec![0xbf, 0x01, 0xbf]; // Magic
                 buffer.append(&mut message_buffer);
-                socket.send_to(&buffer, multicast.as_str()).unwrap();
+                socket.send_to(&buffer, multicast).unwrap();
             }
         }
 
-        if self.tak_server.is_some() {
+        if self.tak_server_ip_address.is_some() {
             if self.tak_server_socket.is_none() {
-                self.tak_server_socket = self.takserver_connect();
+                self.tak_server_socket = self.tak_server_connect();
             }
 
             if let Some(option) = &mut self.tak_server_socket {
@@ -235,7 +263,7 @@ impl CotPublisher {
     }
 
     fn multicast_connect() -> Option<UdpSocket> {
-        match UdpSocket::bind("0.0.0.0:0") {
+        match UdpSocket::bind("192.168.240.1:0") {
             Ok(v) => Some(v),
             Err(e) => {
                 log::warn!("Unable to bind to {}: {}", "0.0.0.0:0", e);
@@ -244,23 +272,31 @@ impl CotPublisher {
         }
     }
 
-    fn takserver_connect(&self) -> Option<StreamOptions> {
-        if self.tak_server.is_none() {
-            log::info!("Attempted to connect to takserver but takserver settings are not set");
+    fn tak_server_connect(&self) -> Option<StreamOptions> {
+        if self.tak_server_ip_address.is_none() && self.tak_server_domain.is_none() {
+            log::info!("Attempted to connect to tak_server but tak_server settings are not set");
             return None;
         }
 
-        let mut stream = match TcpStream::connect(format!(
-            "{}:{}",
-            self.tak_server.as_ref().unwrap().0,
-            self.tak_server.as_ref().unwrap().1
-        )) {
+        let tak_server = if let Some(ip_address) = self.tak_server_ip_address {
+            format!(
+                "{}:{}",
+                ip_address.0,
+                ip_address.1
+            )
+        } else if let Some(domain) = &self.tak_server_domain {
+            domain.to_string()
+        } else {
+            "Unreachable".into()
+        };
+
+        let mut stream = match TcpStream::connect(tak_server.to_owned()) {
             Ok(v) => v,
             Err(e) => {
                 log::warn!(
                     "Unable to connect to {}:{}: {}",
-                    self.tak_server.as_ref().unwrap().0,
-                    self.tak_server.as_ref().unwrap().1,
+                    self.tak_server_ip_address.as_ref().unwrap().0,
+                    self.tak_server_ip_address.as_ref().unwrap().1,
                     e
                 );
                 return None;
@@ -269,7 +305,7 @@ impl CotPublisher {
 
         let server_settings = match self.tak_server_settings.as_ref() {
             Some(settings) => settings,
-            None => &TakServerSettings {
+            None => &TakServerSetting {
                 tls: false,
                 client_key: PEM::None,
                 client_cert: PEM::None,
@@ -289,7 +325,7 @@ impl CotPublisher {
         match &server_settings.root_cert {
             PEM::File(cert) => {
                 if let Err(e) = builder.set_ca_file(cert) {
-                    log::warn!("Unable to set ca_file for takserver connection: {}", e);
+                    log::warn!("Unable to set ca_file for tak_server connection: {}", e);
                     return None;
                 }
             }
@@ -302,7 +338,7 @@ impl CotPublisher {
                 });
                 if let Err(e) = builder.set_verify_cert_store(store.build()) {
                     log::warn!(
-                        "Unable to set certificate_store for takserver connection: {}",
+                        "Unable to set certificate_store for tak_server connection: {}",
                         e
                     );
                     return None;
@@ -315,7 +351,7 @@ impl CotPublisher {
             PEM::File(cert) => {
                 if let Err(e) = builder.set_certificate_file(cert, SslFiletype::PEM) {
                     log::warn!(
-                        "Unable to set client certificate for takserver connection: {}",
+                        "Unable to set client certificate for tak_server connection: {}",
                         e
                     );
                     return None;
@@ -326,7 +362,7 @@ impl CotPublisher {
                 let cert = X509::from_pem(cert.as_bytes()).unwrap();
                 if let Err(e) = builder.set_certificate(&cert) {
                     log::warn!(
-                        "Unable to set client certificate for takserver connection: {}",
+                        "Unable to set client certificate for tak_server connection: {}",
                         e
                     );
                     return None;
@@ -339,7 +375,7 @@ impl CotPublisher {
             PEM::File(key) => {
                 if let Err(e) = builder.set_private_key_file(key, SslFiletype::PEM) {
                     log::warn!(
-                        "Unable to set client private key for takserver connection: {}",
+                        "Unable to set client private key for tak_server connection: {}",
                         e
                     );
                     return None;
@@ -350,7 +386,7 @@ impl CotPublisher {
                 let key = PKey::private_key_from_pem(key.as_bytes()).unwrap();
                 if let Err(e) = builder.set_private_key(&key) {
                     log::warn!(
-                        "Unable to set client private key for takserver connection: {}",
+                        "Unable to set client private key for tak_server connection: {}",
                         e
                     );
                     return None;
@@ -367,14 +403,13 @@ impl CotPublisher {
 
         let connector = builder.build();
 
-        let mut stream =
-            match connector.connect(self.tak_server.as_ref().unwrap().0.as_str(), stream) {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!("Unable to create takserver connection: {}", e);
-                    return None;
-                }
-            };
+        let mut stream = match connector.connect(&tak_server, stream) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Unable to create tak_server connection: {}", e);
+                return None;
+            }
+        };
         stream
             .get_mut()
             .set_read_timeout(Some(std::time::Duration::from_millis(100)))
@@ -401,6 +436,7 @@ impl CotPublisher {
             le: 0.0,
         });
 
+        let time = CotPublisher::get_time();
         tak_proto::TakMessage {
             tak_control: Some(tak_proto::TakControl {
                 min_proto_version: 2,
@@ -409,14 +445,14 @@ impl CotPublisher {
             }),
             cot_event: Some(tak_proto::CotEvent {
                 r#type: self.r#type.to_owned(),
-                access: "".into(),
-                qos: "".into(),
-                opex: "".into(),
+                access: self.access.to_owned(),
+                qos: self.qos.to_owned(),
+                opex: self.opex.to_owned(),
                 uid: self.uid.to_owned(),
-                send_time: CotPublisher::get_time(),
-                start_time: CotPublisher::get_time(),
-                stale_time: CotPublisher::get_time() + self.stale_time_ms,
-                how: "m-g".into(),
+                send_time: time,
+                start_time: time,
+                stale_time: time + self.stale_time_ms,
+                how: self.how.to_owned(),
                 lat: pos.lat,
                 lon: pos.lng,
                 hae: pos.hae,

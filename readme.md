@@ -31,8 +31,13 @@ openssl rsa -in user.key -out user-nopass.key
 let mut publisher = CotPublisher::new(
     "test-uid-1234",
     "a-f-G-U-C",
-    Some("239.2.3.1:6969"),
-    None,
+);
+publisher.set_multicast(
+    "239.2.3.1"
+        .parse::<Ipv4Addr>()
+        .expect("Failed to parse")
+        .into(),
+    6969,
 );
 publisher.publish();
 ```
