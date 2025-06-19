@@ -125,6 +125,10 @@ impl CotPublisher {
         self.tak_server_settings = settings
     }
 
+    pub fn set_uid(&mut self, uid: &str) {
+        self.uid = uid.into();
+    }
+
     pub fn set_contact(&mut self, callsign: Option<&str>, endpoint: Option<&str>) {
         if callsign.is_none() && endpoint.is_none() {
             self.contact = None;
