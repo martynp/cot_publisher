@@ -1,24 +1,39 @@
 [package]
 name = "cot_publisher"
-version = "1.0.0"
+version = "2.0.0-rc1"
 edition = "2021"
 authors = ["Martyn P <martyn@datasync.dev>"]
 license = "MIT"
 description = """
 Cursor On Target (COT) Publisher for multicast or TakServer Data Stream
 """
+keywords = ["cot", "tak", "cursor-on-target", "multicast", "tactical"]
+categories = ["network-programming", "encoding"]
+rust-version = "1.85.1"
 homepage = "https://github.com/martynp/cot_publisher"
 documentation = "https://github.com/martynp/cot_publisher"
 repository = "https://github.com/martynp/cot_publisher"
 readme = "readme.md"
 
 [dependencies]
-openssl = "0.10"
-bytes = "1.10"
-prost = "0.11"
-chrono = "0.4"
-varint-rs = "2.2"
 log = "0.4"
+pkcs8 = { version = "0.10.2", features = ["encryption", "pem"] }
+prost = "0.14"
+rustls = "0.23.32"
+rustls-pemfile = "2.2.0"
+tokio-rustls = "0.26.4"
+tokio = { version = "1.47.1", features = ["net", "rt", "sync", "io-util", "time"] }
+url = "2.5.7"
+varint-rs = "2.2"
+thiserror = "2.0.17"
 
 [build-dependencies]
-prost-build = "0.11"
+prost-build = "0.14"
+
+[dev-dependencies]
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
+env_logger = "0.11"
+
+[features]
+blocking = ["tokio/rt-multi-thread", "tokio/time"]
+emit_errors = []
