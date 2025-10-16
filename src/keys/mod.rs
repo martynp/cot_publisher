@@ -118,6 +118,11 @@ impl<'a> Credentials<'a> {
     }
 
     /// Creates Credentials from encrypted PEM strings or files
+    /// 
+    /// Note: This function currently does not support the Oid used by the default
+    /// TakServer client certificates (OID: 1.2.840.113549.3.7). These certificates
+    /// should be converted to unencrypted PEM format before use, or re-encrypted using
+    /// a supported algorithm (see the pkcs8 crate / const-oid documentation for details).
     ///
     /// # Arguments
     ///

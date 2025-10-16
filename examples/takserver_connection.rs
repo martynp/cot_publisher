@@ -55,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ignore_invalid: false,
         verify_hostname: true,
         auto_reconnect: true,
+        reconnect_delay: 5,
     };
 
     println!("Connecting to TAK Server at {}", tak_server_url);

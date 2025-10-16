@@ -29,6 +29,8 @@ pub struct TakServerSetting<'a> {
     pub verify_hostname: bool,
     /// Automatically reconnect on connection loss
     pub auto_reconnect: bool,
+    /// Auto reconnect delay in seconds
+    pub reconnect_delay: u64,
 }
 
 /// Enum to handle different connection types
@@ -124,7 +126,7 @@ impl ServerCertVerifier for DangerousAcceptAnyServerCertVerifier {
 // Main connection initialization method
 pub async fn create_connection(
     address: Url,
-    settings: TakServerSetting<'static>,
+    settings: &TakServerSetting<'static>,
 ) -> Result<Connection, std::io::Error> {
     // Establish TCP connection first
     let tcp_stream = TcpStream::connect(&format!(
@@ -138,6 +140,9 @@ pub async fn create_connection(
     ))
     .await?;
 
+    tcp_stream.set_linger(Some(std::time::Duration::from_secs(2)))?;
+    tcp_stream.set_nodelay(true)?;
+
     if !settings.tls {
         // Plain TCP connection
         return Ok(Connection::Tcp(tcp_stream));
@@ -149,7 +154,7 @@ pub async fn create_connection(
     // Parse root certificate from PEM - the root certificate may be provided directly or from the
     // client credentials if a p12 package is used
     let mut root_store = RootCertStore::empty();
-    let root_certs = if let Some(root_cert_source) = settings.root_cert {
+    let root_certs = if let Some(root_cert_source) = &settings.root_cert {
         crate::keys::parse_certificates(root_cert_source.load()?)?
     } else if let Some(client_creds) = &settings.client_credentials {
         client_creds.root_cert.clone().ok_or(std::io::Error::other(
@@ -170,7 +175,7 @@ pub async fn create_connection(
     }
 
     // Build client config based on whether we have client credentials
-    let client_config = if let Some(client_credentials) = settings.client_credentials {
+    let client_config = if let Some(client_credentials) = &settings.client_credentials {
         // Mutual TLS configuration
         let client_certs = vec![client_credentials.certificate.to_owned()];
         let private_key = client_credentials.private_key.clone_key();
