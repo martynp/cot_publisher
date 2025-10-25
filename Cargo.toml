@@ -21,9 +21,10 @@ pkcs8 = { version = "0.10.2", features = ["encryption", "pem"] }
 prost = "0.14"
 rustls = "0.23.32"
 rustls-pemfile = "2.2.0"
+rustls-native-certs = "0.8.2"
 thiserror = "2.0.17"
 tokio-rustls = "0.26.4"
-tokio = { version = "1.47.1", features = ["net", "rt", "sync", "io-util"] }
+tokio = { version = "1.47.1", features = ["net", "rt", "sync", "time", "io-util"] }
 url = "2.5.7"
 varint-rs = "2.2"
 

@@ -20,14 +20,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cot_publisher = "2.0.0-rc1"
+cot_publisher = "2.0.0-rc2"
 ```
 
 For blocking operations, enable the blocking feature:
 
 ```toml
 [dependencies]
-cot_publisher = { version = "2.0.0-rc1", features = ["blocking"] }
+cot_publisher = { version = "2.0.0-rc2", features = ["blocking"] }
 ```
 
 ## Basic Usage
@@ -86,13 +86,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credentials = Credentials::from_unencrypted_pem(
         Source::File("/path/to/client-cert.pem".to_string()),
         Source::File("/path/to/client-key.pem".to_string()),
+        Some(Source::File("/path/to/ca-cert.pem".to_string())),
     )?;
     
     // Configure TLS settings
     let settings = TakServerSetting {
         tls: true,
         client_credentials: Some(credentials),
-        root_cert: Some(Source::File("/path/to/ca-cert.pem".to_string())),
         ignore_invalid: false,
         verify_hostname: true,
         auto_reconnect: true,
@@ -173,6 +173,7 @@ Certificates can be loaded from files or embedded as strings in your application
 let credentials = Credentials::from_unencrypted_pem(
     Source::File("client-cert.pem".to_string()),
     Source::File("client-key.pem".to_string()),
+    Some(Source::File("/path/to/ca-cert.pem".to_string())),
 )?;
 
 // From strings (useful for embedded certificates)
@@ -182,8 +183,11 @@ let key_pem = include_str!("../certs/client-key.pem");
 let credentials = Credentials::from_unencrypted_pem(
     Source::String(cert_pem.to_string()),
     Source::String(key_pem.to_string()),
+    Source::String(ca_cert.to_string()),
 )?;
 ```
+
+If the CA Certificate is not provided in the `ClientCredentials` then the system native certificates will be used.
 
 ## TAK Server Configuration
 

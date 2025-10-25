@@ -3,7 +3,7 @@
 
 //! This module provides an interface for handling PEM-encoded keys and certificates.
 
-use pkcs8::{DecodePrivateKey, Error, PrivateKeyInfo, der::Encode};
+use pkcs8::{der::Encode, DecodePrivateKey, Error, PrivateKeyInfo};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// Source for PEM file data
@@ -48,7 +48,7 @@ pub struct Credentials<'a> {
     /// Private key in DER format
     pub private_key: PrivateKeyDer<'a>,
     /// Optional server root certificate
-    pub root_cert: Option<Vec<CertificateDer<'a>>>,
+    pub root_certs: Option<Vec<CertificateDer<'a>>>,
 }
 
 impl<'a> Credentials<'a> {
@@ -58,11 +58,20 @@ impl<'a> Credentials<'a> {
     ///
     /// * `certificate` - PEM-encoded certificate or path to certificate file
     /// * `private_key` - PEM-encoded private key or path to private key file
+    /// * `root_certs` - Optional PEM-encoded root certificates or path to root certificates file
     ///
     pub fn from_unencrypted_pem(
         certificate: Source,
         private_key: Source,
+        root_certs: Option<Source>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // If root certificates are provided, load them
+        let root_certs = if let Some(root_source) = root_certs {
+            Some(load_root_certificates(&root_source)?)
+        } else {
+            None
+        };
+
         let certificates = parse_certificates(certificate.load()?)?;
         let certificate = certificates
             .into_iter()
@@ -82,7 +91,7 @@ impl<'a> Credentials<'a> {
             return Ok(Self {
                 certificate,
                 private_key: PrivateKeyDer::Pkcs8(pkcs8_key),
-                root_cert: None,
+                root_certs,
             });
         }
 
@@ -96,7 +105,7 @@ impl<'a> Credentials<'a> {
             return Ok(Self {
                 certificate,
                 private_key: PrivateKeyDer::Pkcs1(rsa_key),
-                root_cert: None,
+                root_certs,
             });
         }
 
@@ -110,7 +119,7 @@ impl<'a> Credentials<'a> {
             return Ok(Self {
                 certificate,
                 private_key: PrivateKeyDer::Sec1(ec_key),
-                root_cert: None,
+                root_certs,
             });
         }
 
@@ -118,7 +127,7 @@ impl<'a> Credentials<'a> {
     }
 
     /// Creates Credentials from encrypted PEM strings or files
-    /// 
+    ///
     /// Note: This function currently does not support the Oid used by the default
     /// TakServer client certificates (OID: 1.2.840.113549.3.7). These certificates
     /// should be converted to unencrypted PEM format before use, or re-encrypted using
@@ -128,13 +137,22 @@ impl<'a> Credentials<'a> {
     ///
     /// * `certificate` - PEM-encoded certificate or path to certificate file
     /// * `private_key` - PEM-encoded private key or path to private key file
+    /// * `root_certs` - Optional PEM-encoded root certificates or path to root certificates file
     /// * `password` - Password to decrypt the private key
     ///
     pub fn from_encrypted_pem(
         certificate: Source,
         private_key: Source,
+        root_certs: Option<Source>,
         password: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // If root certificates are provided, load them
+        let root_certs = if let Some(root_source) = root_certs {
+            Some(load_root_certificates(&root_source)?)
+        } else {
+            None
+        };
+
         let certificates = parse_certificates(certificate.load()?)?;
         let certificate = certificates
             .into_iter()
@@ -147,7 +165,7 @@ impl<'a> Credentials<'a> {
         Ok(Self {
             certificate,
             private_key,
-            root_cert: None,
+            root_certs,
         })
     }
 }
@@ -165,4 +183,15 @@ pub fn parse_certificates<'a>(cert_pem: String) -> Result<Vec<CertificateDer<'a>
         certs.push(cert_result?);
     }
     Ok(certs)
+}
+
+fn load_root_certificates<'a>(source: &Source) -> Result<Vec<CertificateDer<'a>>, std::io::Error> {
+    let mut root_certs: Vec<CertificateDer<'a>> = Vec::new();
+    let root_cert_pem = source.load()?;
+    let mut cert_reader = std::io::BufReader::new(root_cert_pem.as_bytes());
+    for cert_result in rustls_pemfile::certs(&mut cert_reader) {
+        root_certs.push(cert_result?);
+    }
+
+    Ok(root_certs)
 }

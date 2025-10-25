@@ -4,7 +4,7 @@
 //! Simple multicast CoT publisher example
 //!
 //! This example demonstrates publishing CoT messages to a multicast address.
-//! 
+//!
 //! Run with: cargo run --example simple_multicast
 
 use cot_publisher::CotPublisher;
@@ -23,9 +23,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cot = publisher.create_cot("example-uid-001", "a-f-G-E-V-C")?;
 
     // Set initial position and contact info
-    cot.set_position(37.7749, -122.4194);
+    cot.set_position(51.5074, -0.1278);
     cot.set_contact(Some("BLOCKING-1"), Some("192.168.1.200:8080"));
-    cot.set_position_extended(37.7749, -122.4194, 50.0, 8.0, 10.0);
     cot.set_precision_location(Some("GPS"), Some("GPS"));
 
     // Optionally add custom XML detail
@@ -46,11 +45,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Simulate movement by slightly changing position
         let new_lat = 51.5074 + (i as f64 * 0.001);
         let new_lng = -0.1278 + (i as f64 * 0.001);
-        
-        cot.set_position_extended(new_lat, new_lng, 100.0, 10.0, 15.0);
+
+        cot.set_position(new_lat, new_lng);
 
         cot.publish().await?;
-        println!("Published update {} - Position: {:.4}, {:.4}", i, new_lat, new_lng);
+        println!(
+            "Published update {} - Position: {:.4}, {:.4}",
+            i, new_lat, new_lng
+        );
     }
 
     println!("Example completed successfully!");

@@ -22,34 +22,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credentials = Credentials::from_unencrypted_pem(
         Source::File("/path/to/client-cert.pem".to_string()),
         Source::File("/path/to/client-key.pem".to_string()),
+        Some(Source::File("/path/to/truststore-root.pem".to_string())),
     )?;
 
     // Option 2: Use certificates from strings (useful for embedded certs)
     // Uncomment to use:
     /*
-    let cert_pem = r#"
------BEGIN CERTIFICATE-----
-... your certificate here ...
------END CERTIFICATE-----
-"#;
+        let cert_pem = r#"
+    -----BEGIN CERTIFICATE-----
+    ... your certificate here ...
+    -----END CERTIFICATE-----
+    "#;
 
-    let key_pem = r#"
------BEGIN PRIVATE KEY-----
-... your private key here ...
------END PRIVATE KEY-----
-"#;
+        let key_pem = r#"
+    -----BEGIN PRIVATE KEY-----
+    ... your private key here ...
+    -----END PRIVATE KEY-----
+    "#;
 
-    let credentials = Credentials::from_unencrypted_pem(
-        Source::String(cert_pem.to_string()),
-        Source::String(key_pem.to_string()),
-    )?;
-    */
+        let credentials = Credentials::from_unencrypted_pem(
+            Source::String(cert_pem.to_string()),
+            Source::String(key_pem.to_string()),
+        )?;
+        */
 
     // Configure TLS settings
     let settings = TakServerSetting {
         tls: true,
         client_credentials: Some(credentials),
-        root_cert: Some(Source::File("/path/to/truststore-root.pem".to_string())),
         // WARNING: Setting these to true disables important security checks!
         // Only use in development environments with self-signed certificates
         ignore_invalid: false,
