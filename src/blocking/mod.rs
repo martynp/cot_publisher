@@ -110,7 +110,7 @@ impl CotPublisher {
         let thread_handle = thread::spawn(move || {
             let runtime = Runtime::new().expect("Failed to create Tokio runtime");
 
-            runtime.block_on(crate::takserver_publisher_task(url, settings, receiver))
+            runtime.block_on(crate::takserver_publisher_task_reconnect(url, settings, receiver))
         });
 
         Self {
@@ -137,7 +137,7 @@ impl CotPublisher {
         let thread_handle = thread::spawn(move || {
             let runtime = Runtime::new().expect("Failed to create Tokio runtime");
 
-            runtime.block_on(crate::takserver_publisher_task(url, settings, receiver))
+            runtime.block_on(crate::takserver_publisher_task_reconnect(url, settings, receiver))
         });
 
         Self {

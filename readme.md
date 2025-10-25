@@ -1,139 +1,231 @@
 
-A Rust Cursor-On-Target generator for multicast and streaming data interfaces (TakServer).
+# COT Publisher
 
-# TakServer Setup
+A Rust library for publishing Cursor on Target (COT) messages to multicast networks and TAK Servers. 
 
-Add a new streaming data field, go `Configuration` -> `Inputs and Data Feeds` -> `Add Streaming Data Feed`.
+This library provides both async and blocking interfaces for integrating COT functionality into Rust applications
 
-Give the interface a name and select `Secure Streaming TCP (TLS) CoT or Protobuf` as the protocol. Select a port and select `Save`.
+## Features
 
-Create a user in the TakServer UI, then in the takserver console use the makeCert script:
+The crate supports publishing COT messages through two transport mechanisms:
 
+ * **Multicast Publishing** 
+ * **TLS/mTLS Publishing** (TAK Server etc.)
+ * Async and Blocking API's
+
+
+## Installation
+
+Add this to your `Cargo.toml`:
+
+```toml
+[dependencies]
+cot_publisher = "2.0.0-rc2"
 ```
-cd /opt/tak/certs
-sh -c "source ./makeCert.sh client [username]"
+
+For blocking operations, enable the blocking feature:
+
+```toml
+[dependencies]
+cot_publisher = { version = "2.0.0-rc2", features = ["blocking"] }
 ```
 
-(replace [username] with the user just created)
+## Basic Usage
 
-The key and certificate for the user will be in the `/opt/tag/cert/files` directory.
-
-TakServer generates user keys which are protected by the `atakatak` password, this can be removed using:
-
-```
-openssl rsa -in user.key -out user-nopass.key
-```
-
-
-# Example - Multicast Only
+### Async Multicast Publishing
 
 ```rust
-let mut publisher = CotPublisher::new(
-    "test-uid-1234",
-    "a-f-G-U-C",
-);
-publisher.set_multicast(
-    "239.2.3.1"
-        .parse::<Ipv4Addr>()
-        .expect("Failed to parse")
-        .into(),
-    6969,
-);
-publisher.publish();
+use cot_publisher::CotPublisher;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create publisher for standard TAK multicast address
+    let publisher = CotPublisher::new_multicast("239.2.3.1".parse()?, 6969);
+    
+    // Create a COT message with unique identifier and type
+    let mut cot = publisher.create_cot("my-device-001", "a-f-G-E-V-C")?;
+    
+    // Set position and contact information
+    cot.set_position(51.5074, -0.1278); // London coordinates
+    cot.set_contact(Some("CALLSIGN-1"), Some("192.168.1.100:8080"));
+    
+    // Publish the message
+    cot.publish().await?;
+    
+    Ok(())
+}
 ```
 
-# Example - TakServer stream using TLS credentials from files
+### Blocking Multicast Publishing
 
 ```rust
-let mut publisher = CotPublisher::new(
-    "test-uid-1234",
-    "a-f-G-U-C",
-    None,
-    Some(("192.168.0.2", 9000)),
-);
+use cot_publisher::blocking::CotPublisher;
 
-let ca_file = "[path_to]/truststore-intermediate-CA.pem";
-let client_cert = "[path_to]/user.pem";
-let client_key = "[path_to]/user-nopass.key";
-
-publisher.set_tak_server_tls_settings(Some(TakServerSettings {
-    tls: true,
-    client_key: PEM::File(client_key.into()),
-    client_cert: PEM::File(client_cert.into()),
-    root_cert: PEM::File(ca_file.into()),
-    ignore_invalid: false,
-    verify_hostname: false,
-}));
-
-publisher.connect();
-publisher.publish();
-
-// Required if `publisher` is dropped to ensure message is actually sent
-//std::thread::sleep(std::time::Duration::from_millis(100));
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let publisher = CotPublisher::new_multicast("239.2.3.1".parse()?, 6969);
+    let mut cot = publisher.create_cot("my-device-001", "a-f-G-E-V-C")?;
+    
+    cot.set_position(51.5074, -0.1278);
+    cot.set_contact(Some("CALLSIGN-1"), None);
+    
+    cot.blocking_publish()?;
+    
+    Ok(())
+}
 ```
 
-# Example - TakServer stream using TLS credentials from strings
+### TAK Server Connection with TLS
 
 ```rust
-let mut publisher = CotPublisher::new(
-    "test-uid-1234",
-    "a-f-G-U-C",
-    None,
-    Some(("192.168.0.2", 9000)),
-);
+use cot_publisher::{CotPublisher, Credentials, Source, TakServerSetting};
+use url::Url;
 
-let ca_file = r#"
-Bag Attributes
-    friendlyName: intermediate-CA
-subject=C = US, ST = STATE, L = CITY, O = TAK, OU = ORG_UNIT, CN = intermediate-CA
-issuer=C = US, ST = STATE, L = CITY, O = TAK, OU = ORG_UNIT, CN = takserver-CA
------BEGIN CERTIFICATE-----
-...
------END CERTIFICATE-----
-        "#;
-
-let key = r#"
------BEGIN PRIVATE KEY-----
-...
------END PRIVATE KEY-----
-"#;
-
-let cert = r#"
------BEGIN CERTIFICATE-----
-...
------END CERTIFICATE-----
-"#;
-
-publisher.set_tak_server_tls_settings(Some(TakServerSettings {
-    tls: true,
-    client_key: PEM::String(key.into()),
-    client_cert: PEM::String(cert.into()),
-    root_cert: PEM::String(ca_file_content.into()),
-    ignore_invalid: false,
-    verify_hostname: false,
-}));
-
-publisher.connect();
-publisher.publish();
-
-// Required if `publisher` is dropped to ensure message is actually sent
-//std::thread::sleep(std::time::Duration::from_millis(100));
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load client certificates
+    let credentials = Credentials::from_unencrypted_pem(
+        Source::File("/path/to/client-cert.pem".to_string()),
+        Source::File("/path/to/client-key.pem".to_string()),
+        Some(Source::File("/path/to/ca-cert.pem".to_string())),
+    )?;
+    
+    // Configure TLS settings
+    let settings = TakServerSetting {
+        tls: true,
+        client_credentials: Some(credentials),
+        ignore_invalid: false,
+        verify_hostname: true,
+        auto_reconnect: true,
+    };
+    
+    // Connect to TAK Server
+    let tak_server_url = Url::parse("https://takserver.example.com:8089")?;
+    let mut publisher = CotPublisher::new_takserver(tak_server_url, settings);
+    
+    // Wait for connection establishment
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    
+    // Create and publish COT message
+    let mut cot = publisher.create_cot("takserver-client-001", "a-f-G-E-V-C")?;
+    cot.set_position(40.7128, -74.0060); // New York coordinates
+    cot.set_contact(Some("NYC-BASE"), None);
+    
+    cot.publish().await?;
+    
+    Ok(())
+}
 ```
 
-# Example - Set position
+## COT Message Types
+
+The COT type field follows the standard COT taxonomy. Common types include:
+
+- `a-f-G-E-V-C`: Ground friendly unit, equipment, vehicle, combat
+- `a-f-G-E-V-M`: Ground friendly unit, equipment, vehicle, medical  
+- `a-f-G-I`: Ground friendly unit, installations
+- `a-h-G`: Ground hostile unit
+- `a-n-G`: Ground neutral unit
+- `a-u-G`: Ground unknown unit
+
+## Extended Position Information
 
 ```rust
-
-let mut publisher = CotPublisher::new(
-    "test-uid-1234",
-    "a-f-G-U-C",
-    Some("239.2.3.1:6969"),
-    None,
+// Set position with altitude and accuracy information
+cot.set_position_extended(
+    51.5074,    // latitude
+    -0.1278,    // longitude  
+    100.0,      // altitude (HAE - Height Above Ellipsoid)
+    10.0,       // circular error (CE)
+    15.0        // linear error (LE)
 );
 
-publisher.set_contact(Some("MYTHING"), None);
-publisher.set_position(10.0, 10.0);
-publisher.set_xml_detail(Some("<custom somekey='somevalue'/>"));
-publisher.publish();
-
+// Add precision location source information
+cot.set_precision_location(Some("GPS"), Some("GPS"));
 ```
+
+## Custom XML Details
+
+COT messages support custom XML detail sections for application-specific data:
+
+```rust
+cot.set_xml_detail(Some(r#"
+<custom>
+    <sensor type="thermal" status="active"/>
+    <battery level="85" voltage="12.4"/>
+</custom>
+"#));
+```
+
+## Certificate Management for TAK Server
+
+When connecting to TAK Server, you need client certificates. TAK Server typically generates certificates protected with the password "atakatak". 
+
+It is possible to provide the password as part of the connection `Credential` or remove password protection using:
+
+```bash
+openssl rsa -in client.key -out client-nopass.key
+```
+
+Certificates can be loaded from files or embedded as strings in your application:
+
+```rust
+// From files
+let credentials = Credentials::from_unencrypted_pem(
+    Source::File("client-cert.pem".to_string()),
+    Source::File("client-key.pem".to_string()),
+    Some(Source::File("/path/to/ca-cert.pem".to_string())),
+)?;
+
+// From strings (useful for embedded certificates)
+let cert_pem = include_str!("../certs/client-cert.pem");
+let key_pem = include_str!("../certs/client-key.pem");
+
+let credentials = Credentials::from_unencrypted_pem(
+    Source::String(cert_pem.to_string()),
+    Source::String(key_pem.to_string()),
+    Source::String(ca_cert.to_string()),
+)?;
+```
+
+If the CA Certificate is not provided in the `ClientCredentials` then the system native certificates will be used.
+
+## TAK Server Configuration
+
+To accept COT messages, configure TAK Server with a streaming data feed (in many cases a mTLS connection is enabled by default):
+
+1. Navigate to Configuration → Inputs and Data Feeds → Add Streaming Data Feed
+2. Select "Secure Streaming TCP (TLS) CoT or Protobuf" as the protocol
+3. Configure the desired port
+4. Create client certificates using the TAK Server makeCert script
+
+## Error Handling
+
+Enable error logging by adding the `emit_errors` feature:
+
+```toml
+[dependencies]
+cot_publisher = { version = "2.0.0-rc1", features = ["emit_errors"] }
+```
+
+When enabled logs are emitted via the `log` crate. 
+
+## Examples
+
+The repository includes several complete examples:
+
+- `simple_multicast.rs`: Basic multicast publishing with position updates
+- `blocking_multicast.rs`: Blocking interface demonstration  
+- `takserver_connection.rs`: TAK Server connection with TLS certificates
+
+Run examples with:
+
+```bash
+cargo run --example simple_multicast
+cargo run --features blocking --example blocking_multicast
+```
+
+The takserver example requires certificate / key information to be added before it can be used.
+
+## License
+
+This project is licensed under the MIT License.

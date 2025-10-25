@@ -10,7 +10,7 @@ use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
-use tokio_rustls::{TlsConnector, client::TlsStream};
+use tokio_rustls::{client::TlsStream, TlsConnector};
 use url::Url;
 
 /// Tak server connection settings
@@ -19,8 +19,6 @@ pub struct TakServerSetting<'a> {
     pub tls: bool,
     /// Optional client credentials for mutual TLS authentication
     pub client_credentials: Option<crate::keys::Credentials<'a>>,
-    /// Optional root certificate source for server certificate validation
-    pub root_cert: Option<crate::keys::Source>,
     /// Ignore invalid server certificates (self-signed, expired, hostname mismatch) - WARNING this
     /// disables some protections, but may be necessary for some TAK server configurations
     pub ignore_invalid: bool,
@@ -29,6 +27,8 @@ pub struct TakServerSetting<'a> {
     pub verify_hostname: bool,
     /// Automatically reconnect on connection loss
     pub auto_reconnect: bool,
+    /// Auto reconnect delay in seconds
+    pub reconnect_delay: u64,
 }
 
 /// Enum to handle different connection types
@@ -124,7 +124,7 @@ impl ServerCertVerifier for DangerousAcceptAnyServerCertVerifier {
 // Main connection initialization method
 pub async fn create_connection(
     address: Url,
-    settings: TakServerSetting<'static>,
+    settings: &TakServerSetting<'static>,
 ) -> Result<Connection, std::io::Error> {
     // Establish TCP connection first
     let tcp_stream = TcpStream::connect(&format!(
@@ -138,6 +138,9 @@ pub async fn create_connection(
     ))
     .await?;
 
+    tcp_stream.set_linger(Some(std::time::Duration::from_secs(2)))?;
+    tcp_stream.set_nodelay(true)?;
+
     if !settings.tls {
         // Plain TCP connection
         return Ok(Connection::Tcp(tcp_stream));
@@ -146,31 +149,39 @@ pub async fn create_connection(
     // Build TLS configuration
     let config = ClientConfig::builder();
 
-    // Parse root certificate from PEM - the root certificate may be provided directly or from the
-    // client credentials if a p12 package is used
+    // Parse root certificates from PEM - the root certificates may be provided directly or from the
+    // client credentials if a p12 package is used - otherwise the system root store will be used
     let mut root_store = RootCertStore::empty();
-    let root_certs = if let Some(root_cert_source) = settings.root_cert {
-        crate::keys::parse_certificates(root_cert_source.load()?)?
-    } else if let Some(client_creds) = &settings.client_credentials {
-        client_creds.root_cert.clone().ok_or(std::io::Error::other(
-            "No root certificate provided for TLS connection",
-        ))?
+    if let Some(client_credentials) = &settings.client_credentials {
+        if let Some(root_certs) = &client_credentials.root_certs {
+            for cert in root_certs {
+                root_store.add(cert.clone()).map_err(|e| {
+                    std::io::Error::other(format!(
+                        "Failed to add certificates from ClientCredentials to root certificate store: {e}"
+                    ))
+                })?;
+            }
+        }
     } else {
-        return Err(std::io::Error::other(
-            "No root certificate provided for TLS connection",
-        ));
-    };
-
-    for cert in root_certs {
-        root_store.add(cert).map_err(|e| {
-            std::io::Error::other(format!(
-                "Failed to add certificate to root certificate store: {e}"
-            ))
-        })?;
+        // Load system root certificates if no root certs were provided
+        let cert_result = rustls_native_certs::load_native_certs();
+        if !cert_result.errors.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "Failed to load system root certificates: {:?}",
+                cert_result.errors
+            )));
+        }
+        for cert in cert_result.certs {
+            root_store.add(cert).map_err(|e| {
+                std::io::Error::other(format!(
+                    "Failed to add system certificate to root certificate store: {e}"
+                ))
+            })?;
+        }
     }
 
     // Build client config based on whether we have client credentials
-    let client_config = if let Some(client_credentials) = settings.client_credentials {
+    let client_config = if let Some(client_credentials) = &settings.client_credentials {
         // Mutual TLS configuration
         let client_certs = vec![client_credentials.certificate.to_owned()];
         let private_key = client_credentials.private_key.clone_key();

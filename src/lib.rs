@@ -64,6 +64,7 @@ const UDP_MAGIC: [u8; 3] = [0xbf, 0x01, 0xbf]; // Magic bytes for UDP TAK_PROTO
 const TCP_MAGIC: [u8; 1] = [0xbf]; // Magic byte for TCP TAK_PROTO
 pub(crate) const BROADCAST_CHANNEL_SIZE: usize = 1000; // Size of the broadcast channel buffer
 
+/// Errors that can occur during publishing
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PublishError {
     #[error("Error sending COT message: {0}")]
@@ -186,7 +187,7 @@ impl CotPublisher {
         let (sender, receiver) = tokio::sync::mpsc::channel::<CotSender>(BROADCAST_CHANNEL_SIZE);
         Self {
             broadcast_sender: Some(sender),
-            publish_task: Some(tokio::task::spawn(takserver_publisher_task(
+            publish_task: Some(tokio::task::spawn(takserver_publisher_task_reconnect(
                 url, settings, receiver,
             ))),
         }
@@ -208,7 +209,7 @@ impl CotPublisher {
         let (sender, receiver) = tokio::sync::mpsc::channel::<CotSender>(channel_capacity);
         Self {
             broadcast_sender: Some(sender),
-            publish_task: Some(tokio::task::spawn(takserver_publisher_task(
+            publish_task: Some(tokio::task::spawn(takserver_publisher_task_reconnect(
                 url, settings, receiver,
             ))),
         }
@@ -360,6 +361,40 @@ pub(crate) async fn multicast_publisher_task(
     }
 }
 
+/// Wrapper to enable automatic reconnect logic for the task to manage connection to TAK server
+/// and publish COT messages
+///
+/// # Arguments
+///
+/// * `url` - URL of the TAK server, e.g. takserver.example.com:8080
+/// * `settings` - Settings for the TAK server connection, including credentials
+/// * `receiver` - Mpsc receiver for COT messages to publish
+///
+async fn takserver_publisher_task_reconnect(
+    url: Url,
+    settings: TakServerSetting<'static>,
+    mut receiver: tokio::sync::mpsc::Receiver<CotSender>,
+) -> Result<(), PublishError> {
+    loop {
+        let mut task_result = takserver_publisher_task(url.clone(), &settings, &mut receiver).await;
+
+        if let Err(e) = &mut task_result {
+            handle_error(e.to_string().as_str());
+
+            if settings.auto_reconnect {
+                #[cfg(feature = "emit_errors")]
+                log::warn!(
+                    "Connection to TAK Server lost, reconnecting in {} seconds...",
+                    settings.reconnect_delay
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(settings.reconnect_delay)).await;
+            } else {
+                return task_result;
+            }
+        }
+    }
+}
+
 /// Task to manage connection to TAK server and publish COT messages
 ///
 /// # Arguments
@@ -370,21 +405,21 @@ pub(crate) async fn multicast_publisher_task(
 ///
 pub(crate) async fn takserver_publisher_task(
     url: Url,
-    settings: TakServerSetting<'static>,
-    mut receiver: tokio::sync::mpsc::Receiver<CotSender>,
+    settings: &TakServerSetting<'static>,
+    receiver: &mut tokio::sync::mpsc::Receiver<CotSender>,
 ) -> Result<(), PublishError> {
-    let mut stream = connection::create_connection(url, settings)
-        .await
-        .map_err(|e| PublishError::SendError(format!("Creating connection to TAK server: {e}")))
-        .inspect_err(|e| handle_error(e.to_string().as_str()))?;
+    let mut stream = match connection::create_connection(url, settings).await {
+        Ok(s) => s,
+        Err(e) => {
+            let message = format!("Failed to connect to TAK server: {e}");
+            return Err(PublishError::ConnectionError(message));
+        }
+    };
 
-    stream
-        .write_all(PROTOCOL_CHANGE.as_bytes())
-        .await
-        .map_err(|e| {
-            PublishError::SendError(format!("Failed to send protocol change COT message: {e}"))
-        })
-        .inspect_err(|e| handle_error(e.to_string().as_str()))?;
+    if let Err(e) = stream.write_all(PROTOCOL_CHANGE.as_bytes()).await {
+        let message = format!("Failed to send protocol change COT message: {e}");
+        return Err(PublishError::SendError(message));
+    }
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
@@ -398,6 +433,7 @@ pub(crate) async fn takserver_publisher_task(
                     std::io::Error::other(format!("Failed encoding COT message to protobuf: {e}"))
                 })
                 .inspect_err(|e| {
+                    // Emit error but continue processing
                     handle_error(e.to_string().as_str());
                 });
 
@@ -407,23 +443,17 @@ pub(crate) async fn takserver_publisher_task(
             }
 
             // If this Socket IO fails, we assume the connection is broken and exit the task
-            let result = stream
-                .write_all(&TCP_MAGIC)
-                .await
-                .map_err(|e| {
-                    PublishError::SendError(format!("Failed to send COT message magic byte: {e}"))
-                })
-                .inspect_err(|e| {
-                    handle_error(e.to_string().as_str());
-                });
+            let result = stream.write_all(&TCP_MAGIC).await.map_err(|e| {
+                PublishError::SendError(format!("Failed to send COT message magic byte: {e}"))
+            });
 
             if let Err(e) = result {
                 if let Some(sender) = response_sender {
                     sender
                         .send(Err(PublishError::SendError(e.to_string())))
                         .ok();
-                    return Err(e);
                 }
+                return Err(e);
             }
 
             let result = stream
@@ -431,37 +461,39 @@ pub(crate) async fn takserver_publisher_task(
                 .await
                 .map_err(|e| {
                     PublishError::SendError(format!("Failed to send COT message size: {e}"))
-                })
-                .inspect_err(|e| {
-                    handle_error(e.to_string().as_str());
                 });
 
             if let Err(e) = result {
                 if let Some(sender) = response_sender {
-                    sender
-                        .send(Err(PublishError::SendError(e.to_string())))
-                        .ok();
-                    return Err(e);
+                    sender.send(Err(e.clone())).ok();
                 }
+                return Err(e);
             }
 
-            let result = stream
-                .write_all(&message_buffer)
-                .await
-                .map_err(|e| {
-                    PublishError::SendError(format!("Failed to send COT message data: {e}"))
-                })
-                .inspect_err(|e| {
-                    handle_error(e.to_string().as_str());
-                });
+            let result = stream.write_all(&message_buffer).await.map_err(|e| {
+                PublishError::SendError(format!("Failed to send COT message data: {e}"))
+            });
 
             if let Err(e) = result {
                 if let Some(sender) = response_sender {
-                    sender
-                        .send(Err(PublishError::SendError(e.to_string())))
-                        .ok();
-                    return Err(e);
+                    sender.send(Err(e.clone())).ok();
                 }
+                return Err(e);
+            }
+
+            if let Err(e) = stream
+                .flush()
+                .await
+                .map_err(|e| PublishError::SendError(format!("Failed to flush output buffer: {e}")))
+            {
+                if let Some(sender) = response_sender {
+                    sender.send(Err(e.clone())).ok();
+                }
+                return Err(e);
+            }
+
+            if let Some(sender) = response_sender {
+                sender.send(Ok(())).ok();
             }
         }
     }

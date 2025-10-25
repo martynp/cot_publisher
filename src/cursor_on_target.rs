@@ -277,6 +277,29 @@ impl CursorOnTarget {
         }
     }
 
+    /// Sets the altitude (height above ellipsoid) for this COT entity
+    ///
+    /// If a position already exists, only the altitude is updated.
+    /// Otherwise, creates a new position with `lat`, `lng`, `ce`, and `le` set to 0.0.
+    ///
+    /// # Arguments
+    ///
+    /// * `hae` - Height Above Ellipsoid in meters (WGS-84)
+    ///
+    pub fn set_altitude(&mut self, hae: f64) {
+        if let Some(pos) = self.position.as_mut() {
+            pos.hae = hae;
+        } else {
+            self.position = Some(Position {
+                lat: 0.0,
+                lng: 0.0,
+                hae,
+                ce: 0.0,
+                le: 0.0,
+            });
+        }
+    }
+
     /// Sets the complete position including altitude and accuracy for this COT entity
     ///
     /// Creates or replaces the position with all fields specified.
@@ -321,9 +344,9 @@ impl CursorOnTarget {
     }
 
     /// Sets the unique identifier (UID) for this COT entity
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `uid` - Unique identifier string
     ///
     pub fn set_uid(&mut self, uid: &str) {
