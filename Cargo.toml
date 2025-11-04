@@ -1,13 +1,13 @@
 [package]
 name = "cot_publisher"
-version = "2.0.0-rc2"
+version = "2.0.0"
 edition = "2021"
 authors = ["Martyn P <martyn@datasync.dev>"]
 license = "MIT"
 description = """
-Cursor On Target (COT) Publisher for multicast or TakServer Data Stream
+Cursor On Target (COT) Publisher for multicast UDP or TCP for ATAK ecosystem
 """
-keywords = ["cot", "tak", "cursor-on-target", "multicast", "tactical"]
+keywords = ["cot", "tak", "atak", "cursor-on-target", "multicast", "tactical"]
 categories = ["network-programming", "encoding"]
 rust-version = "1.85.1"
 homepage = "https://github.com/martynp/cot_publisher"
