@@ -156,6 +156,8 @@ cot.set_xml_detail(Some(r#"
 "#));
 ```
 
+See https://github.com/martynp/cot_publisher/blob/main/takproto/detail.proto for more details on how to format the `xml_detail` field.
+
 ## Certificate Management for TAK Server
 
 When connecting to TAK Server, you need client certificates. TAK Server typically generates certificates protected with the password "atakatak". 
