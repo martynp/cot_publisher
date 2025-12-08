@@ -1,7 +1,7 @@
 [package]
 name = "cot_publisher"
-version = "2.0.0"
-edition = "2021"
+version = "2.1.0"
+edition = "2024"
 authors = ["Martyn P <martyn@datasync.dev>"]
 license = "MIT"
 description = """
@@ -19,22 +19,24 @@ readme = "readme.md"
 log = { version = "0.4", optional = true }
 pkcs8 = { version = "0.10.2", features = ["encryption", "pem"] }
 prost = "0.14"
-rustls = "0.23.32"
+rustls = "0.23.34"
 rustls-pemfile = "2.2.0"
 rustls-native-certs = "0.8.2"
 thiserror = "2.0.17"
 tokio-rustls = "0.26.4"
-tokio = { version = "1.47.1", features = ["net", "rt", "sync", "time", "io-util"] }
+tokio = { version = "1.48.0", features = ["net", "rt", "sync", "time", "io-util"] }
 url = "2.5.7"
 varint-rs = "2.2"
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 
 [build-dependencies]
 prost-build = "0.14"
 
 [dev-dependencies]
-tokio = { version = "1.47.1", features = ["macros", "time", "rt-multi-thread"] }
+tokio = { version = "1.48.0", features = ["macros", "time", "rt-multi-thread"] }
 env_logger = "0.11"
 
 [features]
 blocking = ["tokio/rt-multi-thread", "tokio/time"]
 emit_errors = ["log"]
+legacy_des_support = ["openssl"]

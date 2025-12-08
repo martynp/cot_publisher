@@ -20,14 +20,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cot_publisher = "2.0.0-rc2"
+cot_publisher = "2.1.0"
 ```
 
 For blocking operations, enable the blocking feature:
 
 ```toml
 [dependencies]
-cot_publisher = { version = "2.0.0-rc2", features = ["blocking"] }
+cot_publisher = { version = "2.1.0", features = ["blocking"] }
 ```
 
 ## Basic Usage

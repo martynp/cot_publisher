@@ -3,8 +3,11 @@
 
 //! This module provides an interface for handling PEM-encoded keys and certificates.
 
-use pkcs8::{der::Encode, DecodePrivateKey, Error, PrivateKeyInfo};
+use pkcs8::{DecodePrivateKey, Error, PrivateKeyInfo, der::Encode};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+#[cfg(feature = "legacy_des_support")]
+use openssl::rsa::Rsa;
 
 /// Source for PEM file data
 pub enum Source {
@@ -41,12 +44,37 @@ impl TryFrom<PrivateKeyInfo<'_>> for MockKey {
     }
 }
 
+impl MockKey {
+    #[cfg(feature = "legacy_des_support")]
+    pub fn load_encrypted_private_key_der(
+        der_bytes: &[u8],
+        password: &str,
+    ) -> Result<MockKey, pkcs8::Error> {
+        Rsa::private_key_from_pem_passphrase(der_bytes, password.as_bytes())
+            .map(|k| {
+                MockKey(
+                    k.private_key_to_der()
+                        .inspect_err(|e| {
+                            // TODO: handle error
+                            dbg!(e);
+                        })
+                        .unwrap(),
+                )
+            })
+            .map_err(|e| {
+                pkcs8::Error::EncryptedPrivateKey(pkcs8::pkcs5::Error::UnsupportedAlgorithm {
+                    oid: pkcs8::ObjectIdentifier::new("Unknown").unwrap(),
+                })
+            })
+    }
+}
+
 /// Stores the credentials needed for TLS connections
 pub struct Credentials<'a> {
     /// Public certificate in DER format
-    pub certificate: CertificateDer<'a>,
+    pub certificate: Option<CertificateDer<'a>>,
     /// Private key in DER format
-    pub private_key: PrivateKeyDer<'a>,
+    pub private_key: Option<PrivateKeyDer<'a>>,
     /// Optional server root certificate
     pub root_certs: Option<Vec<CertificateDer<'a>>>,
 }
@@ -89,8 +117,8 @@ impl<'a> Credentials<'a> {
 
         if let Some(pkcs8_key) = pkcs8_keys.into_iter().next() {
             return Ok(Self {
-                certificate,
-                private_key: PrivateKeyDer::Pkcs8(pkcs8_key),
+                certificate: Some(certificate),
+                private_key: Some(PrivateKeyDer::Pkcs8(pkcs8_key)),
                 root_certs,
             });
         }
@@ -103,8 +131,8 @@ impl<'a> Credentials<'a> {
 
         if let Some(rsa_key) = rsa_keys.into_iter().next() {
             return Ok(Self {
-                certificate,
-                private_key: PrivateKeyDer::Pkcs1(rsa_key),
+                certificate: Some(certificate),
+                private_key: Some(PrivateKeyDer::Pkcs1(rsa_key)),
                 root_certs,
             });
         }
@@ -117,13 +145,29 @@ impl<'a> Credentials<'a> {
 
         if let Some(ec_key) = ec_keys.into_iter().next() {
             return Ok(Self {
-                certificate,
-                private_key: PrivateKeyDer::Sec1(ec_key),
+                certificate: Some(certificate),
+                private_key: Some(PrivateKeyDer::Sec1(ec_key)),
                 root_certs,
             });
         }
 
         Err("No valid private key found in the provided PEM".into())
+    }
+
+    /// Credentials which only set the root ca certificate
+    ///
+    /// # Arguments
+    ///
+    /// * `root_certs` - PEM-encoded root certificates or path to root certificates file
+    ///
+    pub fn with_root_certs_only(root_certs: Source) -> Result<Self, Box<dyn std::error::Error>> {
+        let root_certs = load_root_certificates(&root_certs)?;
+
+        Ok(Self {
+            certificate: None,
+            private_key: None,
+            root_certs: Some(root_certs),
+        })
     }
 
     /// Creates Credentials from encrypted PEM strings or files
@@ -160,14 +204,28 @@ impl<'a> Credentials<'a> {
             .ok_or("No certificate found")?;
 
         let key_pem = private_key.load()?;
-        let decrypted_key = MockKey::from_pkcs8_encrypted_pem(&key_pem, password).unwrap();
+
+        let decrypted_key = load_encrypted_key(&key_pem, password);
+
         let private_key = PrivateKeyDer::try_from(decrypted_key.as_ref().to_owned())?;
         Ok(Self {
-            certificate,
-            private_key,
+            certificate: Some(certificate),
+            private_key: Some(private_key),
             root_certs,
         })
     }
+}
+
+#[cfg(not(feature = "legacy_des_support"))]
+fn load_encrypted_key(key_pem: &str, password: &str) -> MockKey {
+    MockKey::from_pkcs8_encrypted_pem(key_pem, password).unwrap()
+}
+
+#[cfg(feature = "legacy_des_support")]
+fn load_encrypted_key(key_pem: &str, password: &str) -> MockKey {
+    MockKey::from_pkcs8_encrypted_pem(key_pem, password)
+        .or_else(|_| MockKey::load_encrypted_private_key_der(key_pem.as_bytes(), password))
+        .unwrap()
 }
 
 /// Parses PEM-encoded certificates from a string
