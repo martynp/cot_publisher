@@ -134,6 +134,9 @@ impl CotPublisher {
     /// * `bind_address` - Local IP address for interface to bind to
     ///
     pub fn new_multicast_bind(address: IpAddr, port: u16, bind_address: IpAddr) -> Self {
+        #[cfg(feature = "legacy_des_support")]
+        enable_legacy_openssl();
+
         let (sender, receiver) = tokio::sync::mpsc::channel::<CotSender>(BROADCAST_CHANNEL_SIZE);
         Self {
             broadcast_sender: Some(sender),
@@ -283,6 +286,14 @@ impl CotPublisher {
             Err(std::io::Error::other("Broadcast sender not available"))
         }
     }
+}
+
+#[cfg(feature = "legacy_des_support")]
+fn enable_legacy_openssl() {
+    use openssl::provider::Provider;
+    let _legacy = Provider::load(None, "legacy").expect("Failed to load OpenSSL legacy provider");
+    let _default =
+        Provider::load(None, "default").expect("Failed to load OpenSSL default provider");
 }
 
 /// Source represents either a file path or a direct string input for PEM data

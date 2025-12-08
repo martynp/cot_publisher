@@ -10,7 +10,7 @@ use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
-use tokio_rustls::{client::TlsStream, TlsConnector};
+use tokio_rustls::{TlsConnector, client::TlsStream};
 use url::Url;
 
 /// Tak server connection settings
@@ -181,10 +181,23 @@ pub async fn create_connection(
     }
 
     // Build client config based on whether we have client credentials
-    let client_config = if let Some(client_credentials) = &settings.client_credentials {
+    let client_config = if let Some(client_credentials) = &settings.client_credentials
+        && client_credentials.certificate.is_some()
+        && client_credentials.private_key.is_some()
+    {
         // Mutual TLS configuration
-        let client_certs = vec![client_credentials.certificate.to_owned()];
-        let private_key = client_credentials.private_key.clone_key();
+        let client_certs = vec![
+            client_credentials
+                .certificate
+                .as_ref()
+                .expect("Client certificate was actually none")
+                .to_owned(),
+        ];
+        let private_key = client_credentials
+            .private_key
+            .as_ref()
+            .expect("Private key was actually none")
+            .clone_key();
 
         // Build config with client authentication
         if settings.ignore_invalid {
