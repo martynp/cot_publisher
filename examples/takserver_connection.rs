@@ -16,14 +16,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configure TAK Server connection
     // Replace these with your actual TAK Server details
-    let tak_server_url = Url::parse("https://takserver.example.com:8089")?;
+    let tak_server_url = Url::parse("http://10.0.1.169:8089")?;
 
     // Option 1: Load certificates from files
-    let credentials = Credentials::from_unencrypted_pem(
-        Source::File("/path/to/client-cert.pem".to_string()),
-        Source::File("/path/to/client-key.pem".to_string()),
-        Some(Source::File("/path/to/truststore-root.pem".to_string())),
-    )?;
+//    let credentials = Credentials::from_unencrypted_pem(
+//        Source::File("/path/to/client-cert.pem".to_string()),
+//        Source::File("/path/to/client-key.pem".to_string()),
+//        Some(Source::File("/path/to/truststore-root.pem".to_string())),
+//    )?;
 
     // Option 2: Use certificates from strings (useful for embedded certs)
     // Uncomment to use:
@@ -48,8 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configure TLS settings
     let settings = TakServerSetting {
-        tls: true,
-        client_credentials: Some(credentials),
+        tls: false,
+        client_credentials: None, //Some(credentials),
         // WARNING: Setting these to true disables important security checks!
         // Only use in development environments with self-signed certificates
         ignore_invalid: false,

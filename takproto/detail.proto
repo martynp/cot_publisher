@@ -75,4 +75,16 @@ message Detail {
 
     // <track>
     Track track = 7;
+
+    message ExtensionEncodedDetail {
+        // extension identifier; must be registered with TPC. See
+        // protocol.txt
+        uint32 extensionId = 1;
+        // Single Detail element data encoded per Extension
+        bytes data = 2;
+    }
+    // Other elements handled by registered extensions.
+    // See protocol.txt for details on extensions and their rules for usage.
+    repeated ExtensionEncodedDetail extensionDetails = 8;
+    
 }

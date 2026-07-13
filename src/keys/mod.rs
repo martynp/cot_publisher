@@ -160,7 +160,8 @@ impl<'a> Credentials<'a> {
             .ok_or("No certificate found")?;
 
         let key_pem = private_key.load()?;
-        let decrypted_key = MockKey::from_pkcs8_encrypted_pem(&key_pem, password).unwrap();
+        let decrypted_key = MockKey::from_pkcs8_encrypted_pem(&key_pem, password)
+            .map_err(|e| format!("Failed to decrypt private key: {e}"))?;
         let private_key = PrivateKeyDer::try_from(decrypted_key.as_ref().to_owned())?;
         Ok(Self {
             certificate,

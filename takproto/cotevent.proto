@@ -19,7 +19,21 @@ message CotEvent {
 
     string type = 1;               // <event type="x">
 
-    string access = 2;             // optional
+    string access = 2;             // optional, but see below!
+                                   // field was optional in early
+                                   // cot implementations but now required
+                                   // in MIL-STD-6090.
+                                   // This message definition treats as
+                                   // "optional" due to legacy definition/use,
+                                   // but updated/new clients should be
+                                   // populating on all outgoing message and
+                                   // should treat any missing/empty value
+                                   // as CoT value "Undefined".
+                                   // A CoT/XML value of "Undefined" for this
+                                   // field should be conveyed in this message
+                                   // by omitting this value for compactness
+    string caveat = 16;            // optional
+    string releasableTo = 17;      // optional
     string qos = 3;                // optional
     string opex = 4;               // optional
 

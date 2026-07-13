@@ -4,6 +4,8 @@
 //! Blocking Cursor on Target Publisher implementation
 
 use std::net::IpAddr;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::thread;
 
 use tokio::runtime::Runtime;
@@ -14,7 +16,19 @@ use crate::{CotSender, CursorOnTarget, PublishError, connection::TakServerSettin
 /// Blocking version of CotPublisher that runs a Tokio runtime in a separate thread
 pub struct CotPublisher {
     cot_sender: Option<tokio::sync::mpsc::Sender<CotSender>>,
-    _thread: thread::JoinHandle<Result<(), PublishError>>,
+    thread: Option<thread::JoinHandle<Result<(), PublishError>>>,
+}
+
+impl Drop for CotPublisher {
+    fn drop(&mut self) {
+        // Dropping the sender closes the channel, letting the publisher task's
+        // receive loop exit cleanly so the background thread can be joined below
+        // instead of being left running.
+        drop(self.cot_sender.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl CotPublisher {
@@ -55,7 +69,7 @@ impl CotPublisher {
 
         Self {
             cot_sender: Some(sender),
-            _thread: thread_handle,
+            thread: Some(thread_handle),
         }
     }
 
@@ -92,7 +106,7 @@ impl CotPublisher {
 
         Self {
             cot_sender: Some(sender),
-            _thread: thread_handle,
+            thread: Some(thread_handle),
         }
     }
 
@@ -110,12 +124,17 @@ impl CotPublisher {
         let thread_handle = thread::spawn(move || {
             let runtime = Runtime::new().expect("Failed to create Tokio runtime");
 
-            runtime.block_on(crate::takserver_publisher_task_reconnect(url, settings, receiver))
+            runtime.block_on(crate::takserver_publisher_task_reconnect(
+                url,
+                settings,
+                receiver,
+                Arc::new(AtomicBool::new(false)),
+            ))
         });
 
         Self {
             cot_sender: Some(sender),
-            _thread: thread_handle,
+            thread: Some(thread_handle),
         }
     }
 
@@ -137,12 +156,17 @@ impl CotPublisher {
         let thread_handle = thread::spawn(move || {
             let runtime = Runtime::new().expect("Failed to create Tokio runtime");
 
-            runtime.block_on(crate::takserver_publisher_task_reconnect(url, settings, receiver))
+            runtime.block_on(crate::takserver_publisher_task_reconnect(
+                url,
+                settings,
+                receiver,
+                Arc::new(AtomicBool::new(false)),
+            ))
         });
 
         Self {
             cot_sender: Some(sender),
-            _thread: thread_handle,
+            thread: Some(thread_handle),
         }
     }
 

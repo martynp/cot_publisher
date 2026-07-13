@@ -24,6 +24,11 @@ pub struct TakServerSetting<'a> {
     pub ignore_invalid: bool,
     /// Verify the server hostname against the certificate (Common Name / SAN) - WARNING this disables
     /// some protections, but may be necessary for some TAK server configurations
+    #[deprecated(
+        note = "this field is never read and has no effect; hostname verification is currently \
+                only controllable via `ignore_invalid`, which also disables full chain/expiry \
+                validation. This field will be removed in a future release."
+    )]
     pub verify_hostname: bool,
     /// Automatically reconnect on connection loss
     pub auto_reconnect: bool,

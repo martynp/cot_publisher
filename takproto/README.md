@@ -138,6 +138,63 @@ used during Streaming Connection Protocol Negotiation.
 
 
 
+*** TAK Protocol CoT Detail Extensions for TAK Protocol Version 1
+
+CoT Detail Extensions in TAK Protocol version 1 are utilized as a means to
+further optimize transmission of specific CoT detail items that are prevalent
+in specific scenarios/communities/installations.  The extension mechanism is
+built around the notion of participents "opting in" to receive messages that
+utilize specific extension(s) when they are sent.  Senders MAY only utilize
+an extension when encoding a message to TAK Protocol Payload when the sender
+knows the intended recipient(s) support said extension.
+Extensions are used only to extend the protocol payload format for CoT details.
+Core CoT elements are not eligible for details extension-based encoding.
+
+Extension usage results in some CoT detail being removed from the xml "blob"
+in the Detail protobuf message and being replaced with an identified binary
+message component in the Detail message.
+
+Extensions MUST handle and replace an entire element node tree, including
+its child nodes, as a whole. Partial handling of an element tree is not
+allowed.
+
+Extensions SHOULD take care when designing their encoded binary representations
+to ensure that they capture all possible input values.  Some things to
+consider:
+  - How is an absent attribute/value encoded?
+  - How does the above differ from the set of legitimate values?
+  - How does one represent an "out of range" or "illegal" value, if relevant?
+  - Encoded data type's ability to carry all possible XML-represented values
+  - Endianness of data - TAK apps run on a variety of hardware!
+  - Encoding of strings (UTF-8 usage is highly recommended!)
+
+TAK Protocol v1 internally uses google protocol buffers;  this may be a natural
+choice for any given extension, but it is required to protocol buffers.
+Designers are additionally cautioned that use of protocol buffers is
+not a cure-all for every design issue and one should still consider issues
+such as those described above.
+
+Because the use of an extension when encoding a message wholly replaces the
+xml equivalent, a participent that receives a message containing an
+extension which it does not know how to decode may not be able to ascertain
+the complete meaning of the message.  While the general intent is that
+participants are be "opting in" to what extensions they expect to receive, a
+client SHOULD expect to have to deal with receiving extensions they did not
+advertise to support.  Receivers SHOULD alert users/operators that a message
+was incompletely decoded (via logging, user-facing messaging, data tagging,
+or whatever other means is appropriate).
+
+A participent's decoding support is advertised in different ways depending
+on the method of protocol negotiation.  See the protocol negotiation
+sections of this document for further detail.
+
+The CoT detail extensions are identified by means of an integral ID.  IDs are
+allocated and assigned in a central registry maintained by TPC
+to prevent collision.  Implementers MUST NOT use IDs in public deployments
+which have not been registered. Extension registrations SHALL include
+the XML element name that the extension will encode and handle.
+
+
 *** Streaming Connection Protocol Negotiation
 
 TAK clients often connect to a variety of TAK servers, each of which may be
@@ -166,7 +223,12 @@ client that supports the TAK Protocol.
   <point lat='0.0' lon='0.0' hae='0.0' ce='999999' le='999999'/>
   <detail>
     <TakControl>
-      <TakProtocolSupport version="1"/>
+      <TakProtocolSupport version="1">
+        [Note: DetailExt is an optional element; id OR supportsAll is present,
+         see below]
+        <DetailExt id="extId" supportsAll="true"/> 
+        [... additional optional <DetailExt> elements as needed]
+      </TakProtocolSupport>
     </TakControl>
   </detail>
 </event>
@@ -176,6 +238,27 @@ client that supports the TAK Protocol.
    may contain one or more TakProtocolSupport elements inside the single
    <TakControl> detail, each specifying a supported version.
    The TAK server MUST send this message no more than once per connection.
+
+   The <TakProtocolSupport> element MAY optionally have one or more <DetailExt>
+   child elements. Each of these indicate, using the id attribute,
+   the centrally registered ID of a CoT Detail encoding
+   extension supported for decoding of messages sent from client to server.
+   Rather than listing one or more specific ids in one or more <DetailExt>
+   elements, a server that is prepared to support and accept any CoT
+   Detail Extension may include a single <DetailExt> element containing
+   the attribute supportsAll with a value equal to the exact string "true"
+   (this is intended primarily for server implementations that are aware 
+   of the conceptual and structural presence of extensions as a whole,
+   but merely act to store and/or forward messages opaquely).
+   A <DetailExt> element SHALL include either an id attribute or a
+   supportsAll attribute.
+   <DetailExt> elements merely signify a support indication; the choice to
+   use one or more specific extensions (that the server supports) for any
+   given message sent to the server is left to
+   the client as described in the "TAK Protocol Extensions section".  Clients
+   SHALL NOT use extensions in server-bound messages that are not advertised
+   as supported by the server (for complete clarity, clients SHALL NOT use
+   any detail extensions at all if no DetailExt element is advertised).
 
    To allow for ancillary information in the negotiation, the
    TakProtocolSupport element MAY contain additional attributes compliant
@@ -189,13 +272,33 @@ client that supports the TAK Protocol.
   <point lat='0.0' lon='0.0' hae='0.0' ce='999999' le='999999'/>
   <detail>
     <TakControl>
-      <TakRequest version="1"/>
+      <TakRequest version="1">
+        <DetailExt id="extId"/>
+        [... additional <DetailExt> elements as needed]
+      </TakRequest>
     </TakControl>
   </detail>
 </event>
 
    ... where the version attribute is the integer version chosen above.
    Only ONE TakRequest element is allowed.
+
+   The <TakRequest> MAY have one or more <DetailExt> child elements.
+   These each indicate, using the id attribute, the centrally registered ID
+   of an encoding extension supported for decoding of messages sent to
+   client by server. 
+   This is merely an indication of support for one or more extensions by the
+   client; the choice to use an extension for any given message
+   sent to the client is left to the server as described in the
+   "TAK Protocol Extensions" section.
+   Because TAK Server implementations are generally "store and forward" style
+   message relays, clients connecting to a server that advertises support
+   for extensions in its TakProtocolSupport offer message (see "3") SHOULD
+   expect to potentially receive messages containing extensions it did not
+   advertise support for.  See the general guidance in the "TAK Protocol
+   Extensions" section on handling undecodable extensions in received messages.
+   Because of the above, an id of '*' is not valid for DetailExt children
+   of TakRequest (unlike the server-sent DetailExt elements, see "3").
 
    To allow for ancillary information in the negotiation, the
    TakRequest element MAY contain additional attributes compliant
@@ -280,12 +383,12 @@ selection and support advertisement shall be performed on each device:
    the TakControl message in a TakMessage at least once every 60 seconds.
    This information MAY be sent alongside CotEvent data or standalone.
    This message indicates the minimum and maximum versions of TAK protocol
-   that the device can **decode**.
+   as well as the set of detail extensions that the device can **decode**.
    Note that devices not supporting TAK protocol > 0 will not be sending these
    messages.
    It is RECOMMENDED that devices do *not* frequently change the
-   version information in these messages as receivers may optimize around
-   the information being mostly static/fixed.
+   version and extension information in these messages
+   as receivers may optimize around the information being mostly static/fixed.
    This information SHALL be sent using the protocol level
    determined under the rule in 4 except when rule 4 results in 
    protocol level 0, in which case TakControl information
@@ -300,9 +403,11 @@ selection and support advertisement shall be performed on each device:
    3a. Newly detected clients are assigned a min/max supported version
        equal to the version used to relay the message that resulted
        in discovery of the client. Note that this could be version 0
-       (legacy XML)
+       (legacy XML).  New clients are assigned an empty detail
+       extension support list.
    3b. Upon receipt of a TakControl message, the min/max version info
-       is updated to match the information in the message.  Optimizing
+       and list of supported detail extensions are
+       updated to match the information in the message.  Optimizing
        for infrequent changes of this info is recommended. 
        Note that TakControl messages do NOT allow versions of 0 in them.
        Support for version 0 is implied (see base rules) and need not be
@@ -318,12 +423,18 @@ selection and support advertisement shall be performed on each device:
 4. Devices MUST send out broadcast messages using the highest protocol version
    supported by *all* known contacts (including consideration of the
    sending device itself) tracked based on the rules in (3) at the time
-   of sending.
-   This includes SA announcements/broadcasts.
+   of sending.  The set of detail extensions used SHOULD be the set supported
+   extensions supported by all known contacts tracked based on the rules
+   in (3) at the time of sending, however senders MAY utilize less extensions
+   at their discresion (such as if the local client does not support encoding
+   of one or more extensions used by all other clients).
+   Broadcase message rules above shall include SA announcements/broadcasts.
    If there is no version overlap suitable for all versions, then protocol
    "version 0" must be used.
    If this is "version 0" (legacy xml), then XML shall be used.
-5. Whenever the version computed via rule 5 changes, clients SHALL immediately
+   If no extensions are commonly supported by all known clients, then a sender
+   MUST NOT use any extensions to encode the message being broadcasted.
+5. Whenever the version computed via rule 4 changes, clients SHALL immediately
    send out a TakControl message using the new version per rule 1.
    This must be done even if not otherwise broadcasting a message.
 

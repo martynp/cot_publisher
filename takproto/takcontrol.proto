@@ -20,5 +20,14 @@ message TakControl {
     // this message is paired in a TakMessage with a CotEvent
     // and the CotEvent contains this information
     string contactUid = 3;
+
+    // List of CoT Details Extensions supported for *decoding*
+    // by the sender.  The IDs must be centrally registered with TPC.
+    // The extensions are applied to CoT detail encoding (see detail.proto
+    // and the Detail message therein).
+    // If not present, it shall be assumed the sender does not support
+    // decoding of any extensions.
+    repeated uint32 extensionIds = 4;
+
 }
 

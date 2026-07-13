@@ -43,6 +43,8 @@
 //! ```
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use prost::Message;
 use tokio::io::AsyncWriteExt;
@@ -83,6 +85,10 @@ pub(crate) type CotSender = (
 pub struct CotPublisher {
     broadcast_sender: Option<tokio::sync::mpsc::Sender<CotSender>>,
     publish_task: Option<tokio::task::JoinHandle<Result<(), PublishError>>>,
+    // Tracks whether a live connection is currently established. Always true for
+    // multicast (which is connectionless); for TAK server publishers this reflects
+    // whether the task is mid-reconnect vs actively connected.
+    connected: Arc<AtomicBool>,
 }
 
 const PROTOCOL_CHANGE: &str = r"<event version='2.0' uid='protouid' type='t-x-takp-q' time='TIME' start='TIME' stale='TIME' how='m-g'>
@@ -143,6 +149,8 @@ impl CotPublisher {
                 bind_address,
                 receiver,
             ))),
+            // Multicast is connectionless - always considered "connected" while the task runs
+            connected: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -173,6 +181,8 @@ impl CotPublisher {
                 bind_address,
                 receiver,
             ))),
+            // Multicast is connectionless - always considered "connected" while the task runs
+            connected: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -185,11 +195,16 @@ impl CotPublisher {
     ///
     pub fn new_takserver(url: Url, settings: TakServerSetting<'static>) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::channel::<CotSender>(BROADCAST_CHANNEL_SIZE);
+        let connected = Arc::new(AtomicBool::new(false));
         Self {
             broadcast_sender: Some(sender),
             publish_task: Some(tokio::task::spawn(takserver_publisher_task_reconnect(
-                url, settings, receiver,
+                url,
+                settings,
+                receiver,
+                connected.clone(),
             ))),
+            connected,
         }
     }
 
@@ -207,11 +222,16 @@ impl CotPublisher {
         channel_capacity: usize,
     ) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::channel::<CotSender>(channel_capacity);
+        let connected = Arc::new(AtomicBool::new(false));
         Self {
             broadcast_sender: Some(sender),
             publish_task: Some(tokio::task::spawn(takserver_publisher_task_reconnect(
-                url, settings, receiver,
+                url,
+                settings,
+                receiver,
+                connected.clone(),
             ))),
+            connected,
         }
     }
 
@@ -227,16 +247,21 @@ impl CotPublisher {
             ));
         }
 
-        // Happy path - task is still running
+        // Happy path - task is still running and actively connected
         #[allow(clippy::collapsible_if)] // For MSRV compatibility
         if let Some(task) = &self.publish_task {
             if !task.is_finished() {
-                return Ok(());
+                if self.connected.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                return Err(PublishError::ConnectionError(
+                    "Reconnecting to TAK server".into(),
+                ));
             }
         }
 
-        // Task has finished, return its result
-        let _ = self
+        // Task has finished - join it and surface whatever error it produced
+        let task_result = self
             .publish_task
             .take()
             .expect("Task was None...")
@@ -245,10 +270,14 @@ impl CotPublisher {
                 PublishError::ConnectionError(format!("Failed joining publish task: {e}"))
             })?;
 
-        // Something went wrong and the task stopped with no reason given
-        Err(PublishError::ConnectionError(
-            "Publish task stopped with unknown error".into(),
-        ))
+        match task_result {
+            // The task should never return Ok(()) while this CotPublisher (and its
+            // broadcast_sender) is still alive, but handle it defensively
+            Ok(()) => Err(PublishError::ConnectionError(
+                "Publish task stopped unexpectedly".into(),
+            )),
+            Err(e) => Err(e),
+        }
     }
 
     /// Create a new CursorOnTarget for publishing
@@ -314,51 +343,55 @@ pub(crate) async fn multicast_publisher_task(
 
     let destination = format!("{address}:{port}");
 
-    loop {
-        if let Some((cot, response_sender)) = receiver.recv().await {
-            let message = rpc_from_cot(&cot);
+    // Loop exits (and the task returns) once every Sender has been dropped and recv() yields None
+    while let Some((cot, response_sender)) = receiver.recv().await {
+        let message = rpc_from_cot(&cot);
 
-            let mut message_buffer = Vec::with_capacity(message.encoded_len());
+        let mut message_buffer = Vec::with_capacity(message.encoded_len());
 
-            let conversion_result = message
-                .encode(&mut message_buffer)
-                .map_err(|e| {
-                    std::io::Error::other(format!("Failed encoding COT message to protobuf: {e}"))
-                })
-                .inspect_err(|e| {
-                    handle_error(e.to_string().as_str());
-                });
+        let conversion_result = message
+            .encode(&mut message_buffer)
+            .map_err(|e| {
+                std::io::Error::other(format!("Failed encoding COT message to protobuf: {e}"))
+            })
+            .inspect_err(|e| {
+                handle_error(e.to_string().as_str());
+            });
 
-            // Ignore this message if we can't encode it
-            if conversion_result.is_err() {
-                continue;
-            }
-
-            // If this Socket IO fails, we assume the connection is broken and exit the task
-            let mut buffer = UDP_MAGIC.to_vec(); // Magic
-            buffer.append(&mut message_buffer);
-            let result = socket
-                .send_to(&buffer, &destination)
-                .await
-                .map_err(|e| std::io::Error::other(format!("Failed to send COT message data: {e}")))
-                .inspect_err(|e| {
-                    handle_error(e.to_string().as_str());
-                });
-
+        // Ignore this message if we can't encode it
+        if let Err(e) = conversion_result {
             if let Some(sender) = response_sender {
-                match result {
-                    Ok(_) => {
-                        sender.send(Ok(())).ok();
-                    }
-                    Err(e) => {
-                        sender
-                            .send(Err(PublishError::SendError(e.to_string())))
-                            .ok();
-                    }
+                sender.send(Err(PublishError::SendError(e.to_string()))).ok();
+            }
+            continue;
+        }
+
+        // If this Socket IO fails, we assume the connection is broken and exit the task
+        let mut buffer = UDP_MAGIC.to_vec(); // Magic
+        buffer.append(&mut message_buffer);
+        let result = socket
+            .send_to(&buffer, &destination)
+            .await
+            .map_err(|e| std::io::Error::other(format!("Failed to send COT message data: {e}")))
+            .inspect_err(|e| {
+                handle_error(e.to_string().as_str());
+            });
+
+        if let Some(sender) = response_sender {
+            match result {
+                Ok(_) => {
+                    sender.send(Ok(())).ok();
+                }
+                Err(e) => {
+                    sender
+                        .send(Err(PublishError::SendError(e.to_string())))
+                        .ok();
                 }
             }
         }
     }
+
+    Ok(())
 }
 
 /// Wrapper to enable automatic reconnect logic for the task to manage connection to TAK server
@@ -369,14 +402,26 @@ pub(crate) async fn multicast_publisher_task(
 /// * `url` - URL of the TAK server, e.g. takserver.example.com:8080
 /// * `settings` - Settings for the TAK server connection, including credentials
 /// * `receiver` - Mpsc receiver for COT messages to publish
+/// * `connected` - Shared flag reflecting whether a connection is currently established
 ///
 async fn takserver_publisher_task_reconnect(
     url: Url,
     settings: TakServerSetting<'static>,
     mut receiver: tokio::sync::mpsc::Receiver<CotSender>,
+    connected: Arc<AtomicBool>,
 ) -> Result<(), PublishError> {
     loop {
-        let mut task_result = takserver_publisher_task(url.clone(), &settings, &mut receiver).await;
+        let mut task_result =
+            takserver_publisher_task(url.clone(), &settings, &mut receiver, &connected).await;
+
+        // Whether the task exited cleanly or with an error, no connection is live anymore
+        connected.store(false, Ordering::Relaxed);
+
+        // Ok(()) only happens once every Sender has been dropped and the channel has
+        // closed for good - there is nothing left to reconnect for, so shut down.
+        if task_result.is_ok() {
+            return task_result;
+        }
 
         if let Err(e) = &mut task_result {
             handle_error(e.to_string().as_str());
@@ -402,11 +447,13 @@ async fn takserver_publisher_task_reconnect(
 /// * `url` - URL of the TAK server, e.g. takserver.example.com:8080
 /// * `settings` - Settings for the TAK server connection, including credentials
 /// * `receiver` - Mpsc receiver for COT messages to publish
+/// * `connected` - Shared flag set once the connection handshake completes successfully
 ///
 pub(crate) async fn takserver_publisher_task(
     url: Url,
     settings: &TakServerSetting<'static>,
     receiver: &mut tokio::sync::mpsc::Receiver<CotSender>,
+    connected: &Arc<AtomicBool>,
 ) -> Result<(), PublishError> {
     let mut stream = match connection::create_connection(url, settings).await {
         Ok(s) => s,
@@ -423,80 +470,85 @@ pub(crate) async fn takserver_publisher_task(
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    loop {
-        if let Some((cot, response_sender)) = receiver.recv().await {
-            let message = rpc_from_cot(&cot);
-            let mut message_buffer = Vec::with_capacity(message.encoded_len());
-            let conversion_result = message
-                .encode(&mut message_buffer)
-                .map_err(|e| {
-                    std::io::Error::other(format!("Failed encoding COT message to protobuf: {e}"))
-                })
-                .inspect_err(|e| {
-                    // Emit error but continue processing
-                    handle_error(e.to_string().as_str());
-                });
+    // Handshake complete - the connection is now live
+    connected.store(true, Ordering::Relaxed);
 
-            // Ignore this message if we can't encode it
-            if conversion_result.is_err() {
-                continue;
-            }
-
-            // If this Socket IO fails, we assume the connection is broken and exit the task
-            let result = stream.write_all(&TCP_MAGIC).await.map_err(|e| {
-                PublishError::SendError(format!("Failed to send COT message magic byte: {e}"))
+    // Loop exits (and the task returns) once every Sender has been dropped and recv() yields None
+    while let Some((cot, response_sender)) = receiver.recv().await {
+        let message = rpc_from_cot(&cot);
+        let mut message_buffer = Vec::with_capacity(message.encoded_len());
+        let conversion_result = message
+            .encode(&mut message_buffer)
+            .map_err(|e| {
+                std::io::Error::other(format!("Failed encoding COT message to protobuf: {e}"))
+            })
+            .inspect_err(|e| {
+                // Emit error but continue processing
+                handle_error(e.to_string().as_str());
             });
 
-            if let Err(e) = result {
-                if let Some(sender) = response_sender {
-                    sender
-                        .send(Err(PublishError::SendError(e.to_string())))
-                        .ok();
-                }
-                return Err(e);
-            }
-
-            let result = stream
-                .write_all(&get_varint(message_buffer.len() as u32))
-                .await
-                .map_err(|e| {
-                    PublishError::SendError(format!("Failed to send COT message size: {e}"))
-                });
-
-            if let Err(e) = result {
-                if let Some(sender) = response_sender {
-                    sender.send(Err(e.clone())).ok();
-                }
-                return Err(e);
-            }
-
-            let result = stream.write_all(&message_buffer).await.map_err(|e| {
-                PublishError::SendError(format!("Failed to send COT message data: {e}"))
-            });
-
-            if let Err(e) = result {
-                if let Some(sender) = response_sender {
-                    sender.send(Err(e.clone())).ok();
-                }
-                return Err(e);
-            }
-
-            if let Err(e) = stream
-                .flush()
-                .await
-                .map_err(|e| PublishError::SendError(format!("Failed to flush output buffer: {e}")))
-            {
-                if let Some(sender) = response_sender {
-                    sender.send(Err(e.clone())).ok();
-                }
-                return Err(e);
-            }
-
+        // Ignore this message if we can't encode it
+        if let Err(e) = conversion_result {
             if let Some(sender) = response_sender {
-                sender.send(Ok(())).ok();
+                sender.send(Err(PublishError::SendError(e.to_string()))).ok();
             }
+            continue;
+        }
+
+        // If this Socket IO fails, we assume the connection is broken and exit the task
+        let result = stream.write_all(&TCP_MAGIC).await.map_err(|e| {
+            PublishError::SendError(format!("Failed to send COT message magic byte: {e}"))
+        });
+
+        if let Err(e) = result {
+            if let Some(sender) = response_sender {
+                sender
+                    .send(Err(PublishError::SendError(e.to_string())))
+                    .ok();
+            }
+            return Err(e);
+        }
+
+        let result = stream
+            .write_all(&get_varint(message_buffer.len() as u32))
+            .await
+            .map_err(|e| PublishError::SendError(format!("Failed to send COT message size: {e}")));
+
+        if let Err(e) = result {
+            if let Some(sender) = response_sender {
+                sender.send(Err(e.clone())).ok();
+            }
+            return Err(e);
+        }
+
+        let result = stream.write_all(&message_buffer).await.map_err(|e| {
+            PublishError::SendError(format!("Failed to send COT message data: {e}"))
+        });
+
+        if let Err(e) = result {
+            if let Some(sender) = response_sender {
+                sender.send(Err(e.clone())).ok();
+            }
+            return Err(e);
+        }
+
+        if let Err(e) = stream
+            .flush()
+            .await
+            .map_err(|e| PublishError::SendError(format!("Failed to flush output buffer: {e}")))
+        {
+            if let Some(sender) = response_sender {
+                sender.send(Err(e.clone())).ok();
+            }
+            return Err(e);
+        }
+
+        if let Some(sender) = response_sender {
+            sender.send(Ok(())).ok();
         }
     }
+
+    Ok(())
 }
 
 /// Converts a CursorOnTarget struct to a tak_proto::TakMessage protobuf message
@@ -520,6 +572,7 @@ fn rpc_from_cot(cot: &CursorOnTarget) -> tak_proto::TakMessage {
             min_proto_version: 2, // Hard coded as this is the only version supported
             max_proto_version: 2, // Hard coded as this is the only version supported
             contact_uid: cot.uid.to_owned(),
+            extension_ids: Vec::new(), // No extensions supported at this time
         }),
         cot_event: Some(tak_proto::CotEvent {
             r#type: cot.r#type.to_owned(),
@@ -552,7 +605,10 @@ fn rpc_from_cot(cot: &CursorOnTarget) -> tak_proto::TakMessage {
                 status: None,
                 takv: None,
                 track: None,
+                extension_details: Vec::new(), // No extension details supported at this time
             }),
+            caveat: "".into(),
+            releasable_to: "".into(),
         }),
     }
 }
