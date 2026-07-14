@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2021-2025 Martyn P <martyn@datasync.dev>
+// Copyright (c) 2021-2026 Martyn P <martyn@datasync.dev>
 
 //! This module provides an interface for establishing TCP and TLS connections to TAK servers.
 
@@ -7,7 +7,9 @@ use std::io;
 use std::sync::Arc;
 
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::WebPkiSupportedAlgorithms;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::server::ParsedCertificate;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio_rustls::{client::TlsStream, TlsConnector};
@@ -22,13 +24,11 @@ pub struct TakServerSetting<'a> {
     /// Ignore invalid server certificates (self-signed, expired, hostname mismatch) - WARNING this
     /// disables some protections, but may be necessary for some TAK server configurations
     pub ignore_invalid: bool,
-    /// Verify the server hostname against the certificate (Common Name / SAN) - WARNING this disables
-    /// some protections, but may be necessary for some TAK server configurations
-    #[deprecated(
-        note = "this field is never read and has no effect; hostname verification is currently \
-                only controllable via `ignore_invalid`, which also disables full chain/expiry \
-                validation. This field will be removed in a future release."
-    )]
+    /// Verify the server hostname against the certificate (Common Name / SAN). When `false`, the
+    /// certificate chain of trust and expiry are still validated, but the hostname/SAN match is
+    /// skipped - WARNING this disables some protections, but may be necessary for some TAK server
+    /// configurations where the server certificate doesn't carry the connecting hostname. This is
+    /// distinct from `ignore_invalid`, which skips chain/expiry validation entirely.
     pub verify_hostname: bool,
     /// Automatically reconnect on connection loss
     pub auto_reconnect: bool,
@@ -73,6 +73,22 @@ impl tokio::io::AsyncWrite for Connection {
         match &mut *self {
             Connection::Tcp(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
             Connection::Tls(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+// Implement AsyncRead for our Connection enum, so callers can split the connection into
+// independent read/write halves (needed to observe server traffic during TAK protocol
+// negotiation while still being able to write CoT messages)
+impl tokio::io::AsyncRead for Connection {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        match &mut *self {
+            Connection::Tcp(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            Connection::Tls(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
@@ -123,6 +139,59 @@ impl ServerCertVerifier for DangerousAcceptAnyServerCertVerifier {
 
     fn root_hint_subjects(&self) -> Option<&[rustls::DistinguishedName]> {
         None
+    }
+}
+
+// Certificate verifier for when verify_hostname is false but ignore_invalid is not set:
+// validates the certificate chain of trust and expiry as normal, but deliberately skips the
+// hostname/SAN match that `verify_server_name` would otherwise perform.
+#[derive(Debug)]
+struct ChainOnlyServerCertVerifier {
+    roots: RootCertStore,
+    supported_algs: WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for ChainOnlyServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer,
+        intermediates: &[CertificateDer],
+        _server_name: &ServerName,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let cert = ParsedCertificate::try_from(end_entity)?;
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            self.supported_algs.all,
+        )?;
+        // Deliberately not calling verify_server_name() here - that's the point of this verifier.
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.supported_algs)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.supported_algs)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.supported_algs.supported_schemes()
     }
 }
 
@@ -198,6 +267,16 @@ pub async fn create_connection(
                 .with_custom_certificate_verifier(Arc::new(DangerousAcceptAnyServerCertVerifier))
                 .with_client_auth_cert(client_certs, private_key)
                 .map_err(|e| std::io::Error::other(format!("Failed to build client config: {e}")))?
+        } else if !settings.verify_hostname {
+            config
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(ChainOnlyServerCertVerifier {
+                    roots: root_store,
+                    supported_algs: rustls::crypto::aws_lc_rs::default_provider()
+                        .signature_verification_algorithms,
+                }))
+                .with_client_auth_cert(client_certs, private_key)
+                .map_err(|e| std::io::Error::other(format!("Failed to build client config: {e}")))?
         } else {
             config
                 .with_root_certificates(root_store)
@@ -211,6 +290,15 @@ pub async fn create_connection(
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(DangerousAcceptAnyServerCertVerifier))
                 .with_no_client_auth()
+        } else if !settings.verify_hostname {
+            config
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(ChainOnlyServerCertVerifier {
+                    roots: root_store,
+                    supported_algs: rustls::crypto::aws_lc_rs::default_provider()
+                        .signature_verification_algorithms,
+                }))
+                .with_no_client_auth()
         } else {
             config
                 .with_root_certificates(root_store)
@@ -219,8 +307,13 @@ pub async fn create_connection(
     };
 
     let connector = TlsConnector::from(Arc::new(client_config));
-    let server_name = ServerName::try_from(address.host_str().unwrap().to_owned())
-        .map_err(|e| std::io::Error::other(format!("Invalid server name: {e}")))?;
+    let server_name = ServerName::try_from(
+        address
+            .host_str()
+            .ok_or(std::io::Error::other("Host string was missing"))?
+            .to_owned(),
+    )
+    .map_err(|e| std::io::Error::other(format!("Invalid server name: {e}")))?;
     let tls_stream = connector.connect(server_name, tcp_stream).await?;
 
     Ok(Connection::Tls(tls_stream))

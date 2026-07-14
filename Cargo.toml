@@ -1,6 +1,6 @@
 [package]
 name = "cot_publisher"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 authors = ["Martyn P <martyn@datasync.dev>"]
 license = "MIT"
@@ -11,7 +11,7 @@ keywords = ["cot", "tak", "atak", "cursor-on-target", "multicast"]
 categories = ["network-programming", "encoding"]
 rust-version = "1.85.1"
 homepage = "https://github.com/martynp/cot_publisher"
-documentation = "https://github.com/martynp/cot_publisher"
+documentation = "https://docs.rs/cot_publisher"
 repository = "https://github.com/martynp/cot_publisher"
 readme = "readme.md"
 
@@ -24,17 +24,22 @@ rustls-pemfile = "2.2.0"
 rustls-native-certs = "0.8.2"
 thiserror = "2.0.17"
 tokio-rustls = "0.26.4"
-tokio = { version = "1.47.1", features = ["net", "rt", "sync", "time", "io-util"] }
+tokio = { version = "1.47.1", features = ["net", "rt", "sync", "time", "io-util", "macros"] }
 url = "2.5.7"
 varint-rs = "2.2"
+quick-xml = "0.41.0"
 
 [build-dependencies]
 prost-build = "0.14"
 
 [dev-dependencies]
-tokio = { version = "1.47.1", features = ["macros", "time", "rt-multi-thread"] }
+tokio = { version = "1.47.1", features = ["macros", "time", "rt-multi-thread", "net", "io-util"] }
 env_logger = "0.11"
 
 [features]
 blocking = ["tokio/rt-multi-thread", "tokio/time"]
 emit_errors = ["log"]
+
+[[example]]
+name = "blocking_multicast"
+required-features = ["blocking"]

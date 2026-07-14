@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2021-2025 Martyn P <martyn@datasync.dev>
+// Copyright (c) 2021-2026 Martyn P <martyn@datasync.dev>
 
 //! Simple multicast CoT publisher example
 //!

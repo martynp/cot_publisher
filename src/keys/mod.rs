@@ -1,16 +1,28 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2021-2025 Martyn P <martyn@datasync.dev>
+// Copyright (c) 2021-2026 Martyn P <martyn@datasync.dev>
 
 //! This module provides an interface for handling PEM-encoded keys and certificates.
+use std::fmt::Display;
 
 use pkcs8::{der::Encode, DecodePrivateKey, Error, PrivateKeyInfo};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// Source for PEM file data
+///
 pub enum Source {
     None,
     File(String),
     String(String),
+}
+
+impl Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::None => write!(f, "None"),
+            Source::File(path) => write!(f, "File({})", path),
+            Source::String(_) => write!(f, "String(...)"),
+        }
+    }
 }
 
 impl Source {
@@ -188,7 +200,9 @@ pub fn parse_certificates<'a>(cert_pem: String) -> Result<Vec<CertificateDer<'a>
 
 fn load_root_certificates<'a>(source: &Source) -> Result<Vec<CertificateDer<'a>>, std::io::Error> {
     let mut root_certs: Vec<CertificateDer<'a>> = Vec::new();
-    let root_cert_pem = source.load()?;
+    let root_cert_pem = source
+        .load()
+        .map_err(|e| std::io::Error::other(format!("Failed to load {source}: {e}")))?;
     let mut cert_reader = std::io::BufReader::new(root_cert_pem.as_bytes());
     for cert_result in rustls_pemfile::certs(&mut cert_reader) {
         root_certs.push(cert_result?);

@@ -20,14 +20,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cot_publisher = "2.0.0-rc2"
+cot_publisher = "2.1.0"
 ```
 
 For blocking operations, enable the blocking feature:
 
 ```toml
 [dependencies]
-cot_publisher = { version = "2.0.0-rc2", features = ["blocking"] }
+cot_publisher = { version = "2.1.0", features = ["blocking"] }
 ```
 
 ## Basic Usage
@@ -96,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ignore_invalid: false,
         verify_hostname: true,
         auto_reconnect: true,
+        reconnect_delay: 5,
     };
     
     // Connect to TAK Server
@@ -179,11 +180,12 @@ let credentials = Credentials::from_unencrypted_pem(
 // From strings (useful for embedded certificates)
 let cert_pem = include_str!("../certs/client-cert.pem");
 let key_pem = include_str!("../certs/client-key.pem");
+let ca_cert_pem = include_str!("../certs/ca-cert.pem");
 
 let credentials = Credentials::from_unencrypted_pem(
     Source::String(cert_pem.to_string()),
     Source::String(key_pem.to_string()),
-    Source::String(ca_cert.to_string()),
+    Some(Source::String(ca_cert_pem.to_string())),
 )?;
 ```
 
@@ -204,7 +206,7 @@ Enable error logging by adding the `emit_errors` feature:
 
 ```toml
 [dependencies]
-cot_publisher = { version = "2.0.0-rc1", features = ["emit_errors"] }
+cot_publisher = { version = "2.1.0", features = ["emit_errors"] }
 ```
 
 When enabled logs are emitted via the `log` crate. 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2021-2025 Martyn P <martyn@datasync.dev>
+// Copyright (c) 2021-2026 Martyn P <martyn@datasync.dev>
 
 //! This crate provides an interface for publishing Cursor on Target (COT) messages
 //! to multicast addresses or TAK servers over TCP/TLS.
@@ -19,8 +19,8 @@
 //!
 //! ## Async multicast
 //!
-//! ```
-//! use cot_publisher::{CotPublisher, CursorOnTarget};
+//! ```no_run
+//! use cot_publisher::CotPublisher;
 //!
 //! async fn example() {
 //!     let publisher = CotPublisher::new_multicast("239.2.3.1".parse().unwrap(), 6969);
@@ -32,7 +32,12 @@
 //! ```
 //!
 //! ## Blocking multicast
-//! ```
+//!
+//! Requires the `blocking` feature.
+//!
+//! ```no_run
+//! # #[cfg(feature = "blocking")]
+//! # {
 //! use cot_publisher::blocking::CotPublisher;
 //!
 //! let publisher = CotPublisher::new_multicast("239.2.3.1".parse().unwrap(), 6969);
@@ -40,6 +45,7 @@
 //! cot.set_position(51.5074, -0.1278);
 //! cot.set_contact(Some("CALLSIGN"), None);
 //! cot.blocking_publish().unwrap();
+//! # }
 //! ```
 
 use std::net::IpAddr;
@@ -47,7 +53,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use prost::Message;
-use tokio::io::AsyncWriteExt;
 use url::Url;
 use varint_rs::VarintWriter;
 
@@ -56,6 +61,7 @@ pub mod blocking;
 mod connection;
 mod cursor_on_target;
 mod keys;
+mod streaming;
 
 // Re-export modules for library users
 pub use crate::connection::TakServerSetting;
@@ -90,15 +96,6 @@ pub struct CotPublisher {
     // whether the task is mid-reconnect vs actively connected.
     connected: Arc<AtomicBool>,
 }
-
-const PROTOCOL_CHANGE: &str = r"<event version='2.0' uid='protouid' type='t-x-takp-q' time='TIME' start='TIME' stale='TIME' how='m-g'>
-      <point lat='0.0' lon='0.0' hae='0.0' ce='999999' le='999999'/>
-      <detail>
-        <TakControl>
-          <TakRequest version='1'/>
-        </TakControl>
-      </detail>
-    </event>\n\n";
 
 /// Tak_proto definition build using build.rs stage
 pub mod tak_proto {
@@ -361,7 +358,9 @@ pub(crate) async fn multicast_publisher_task(
         // Ignore this message if we can't encode it
         if let Err(e) = conversion_result {
             if let Some(sender) = response_sender {
-                sender.send(Err(PublishError::SendError(e.to_string()))).ok();
+                sender
+                    .send(Err(PublishError::SendError(e.to_string())))
+                    .ok();
             }
             continue;
         }
@@ -455,7 +454,7 @@ pub(crate) async fn takserver_publisher_task(
     receiver: &mut tokio::sync::mpsc::Receiver<CotSender>,
     connected: &Arc<AtomicBool>,
 ) -> Result<(), PublishError> {
-    let mut stream = match connection::create_connection(url, settings).await {
+    let stream = match connection::create_connection(url, settings).await {
         Ok(s) => s,
         Err(e) => {
             let message = format!("Failed to connect to TAK server: {e}");
@@ -463,92 +462,24 @@ pub(crate) async fn takserver_publisher_task(
         }
     };
 
-    if let Err(e) = stream.write_all(PROTOCOL_CHANGE.as_bytes()).await {
-        let message = format!("Failed to send protocol change COT message: {e}");
-        return Err(PublishError::SendError(message));
-    }
-
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-    // Handshake complete - the connection is now live
+    // The connection is live as soon as it's established - per the Traditional Protocol
+    // and negotiation steps 1-4, plain CoT XML can be exchanged immediately, before any
+    // TAK Protocol upgrade is negotiated (or even attempted).
     connected.store(true, Ordering::Relaxed);
 
-    // Loop exits (and the task returns) once every Sender has been dropped and recv() yields None
-    while let Some((cot, response_sender)) = receiver.recv().await {
-        let message = rpc_from_cot(&cot);
-        let mut message_buffer = Vec::with_capacity(message.encoded_len());
-        let conversion_result = message
-            .encode(&mut message_buffer)
-            .map_err(|e| {
-                std::io::Error::other(format!("Failed encoding COT message to protobuf: {e}"))
-            })
-            .inspect_err(|e| {
-                // Emit error but continue processing
-                handle_error(e.to_string().as_str());
-            });
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut xml_reader = streaming::XmlEventReader::new(read_half);
 
-        // Ignore this message if we can't encode it
-        if let Err(e) = conversion_result {
-            if let Some(sender) = response_sender {
-                sender.send(Err(PublishError::SendError(e.to_string()))).ok();
-            }
-            continue;
+    match streaming::negotiate_tak_protocol(&mut xml_reader, &mut write_half, receiver).await? {
+        streaming::NegotiationOutcome::Shutdown => Ok(()),
+        streaming::NegotiationOutcome::Binary => {
+            let (read_half, leftover) = xml_reader.into_parts();
+            streaming::run_binary_publish_loop(read_half, leftover, write_half, receiver).await
         }
-
-        // If this Socket IO fails, we assume the connection is broken and exit the task
-        let result = stream.write_all(&TCP_MAGIC).await.map_err(|e| {
-            PublishError::SendError(format!("Failed to send COT message magic byte: {e}"))
-        });
-
-        if let Err(e) = result {
-            if let Some(sender) = response_sender {
-                sender
-                    .send(Err(PublishError::SendError(e.to_string())))
-                    .ok();
-            }
-            return Err(e);
-        }
-
-        let result = stream
-            .write_all(&get_varint(message_buffer.len() as u32))
-            .await
-            .map_err(|e| PublishError::SendError(format!("Failed to send COT message size: {e}")));
-
-        if let Err(e) = result {
-            if let Some(sender) = response_sender {
-                sender.send(Err(e.clone())).ok();
-            }
-            return Err(e);
-        }
-
-        let result = stream.write_all(&message_buffer).await.map_err(|e| {
-            PublishError::SendError(format!("Failed to send COT message data: {e}"))
-        });
-
-        if let Err(e) = result {
-            if let Some(sender) = response_sender {
-                sender.send(Err(e.clone())).ok();
-            }
-            return Err(e);
-        }
-
-        if let Err(e) = stream
-            .flush()
-            .await
-            .map_err(|e| PublishError::SendError(format!("Failed to flush output buffer: {e}")))
-        {
-            if let Some(sender) = response_sender {
-                sender.send(Err(e.clone())).ok();
-            }
-            return Err(e);
-        }
-
-        if let Some(sender) = response_sender {
-            sender.send(Ok(())).ok();
+        streaming::NegotiationOutcome::PlainXml => {
+            streaming::run_plain_xml_publish_loop(xml_reader, write_half, receiver).await
         }
     }
-
-    Ok(())
 }
 
 /// Converts a CursorOnTarget struct to a tak_proto::TakMessage protobuf message
@@ -558,19 +489,22 @@ pub(crate) async fn takserver_publisher_task(
 /// * `cot` - Reference to the CursorOnTarget struct to convert
 ///
 fn rpc_from_cot(cot: &CursorOnTarget) -> tak_proto::TakMessage {
+    // When no position has been set, lat/lng fall back to Null Island (0, 0) - but ce/le
+    // must signal "unknown accuracy" (9999999, the CoT convention) rather than "perfect
+    // fix", which is how TAK/ATAK would otherwise render a bare 0.0/0.0 position.
     let pos = cot.position.as_ref().unwrap_or(&Position {
         lat: 0.0,
         lng: 0.0,
         hae: 0.0,
-        ce: 0.0,
-        le: 0.0,
+        ce: 9999999.0,
+        le: 9999999.0,
     });
 
     let time = get_time();
     tak_proto::TakMessage {
         tak_control: Some(tak_proto::TakControl {
-            min_proto_version: 2, // Hard coded as this is the only version supported
-            max_proto_version: 2, // Hard coded as this is the only version supported
+            min_proto_version: 1, // Hard coded as this is the only version supported
+            max_proto_version: 1, // Hard coded as this is the only version supported
             contact_uid: cot.uid.to_owned(),
             extension_ids: Vec::new(), // No extensions supported at this time
         }),
@@ -641,3 +575,93 @@ fn handle_error(e: &str) {
 #[cfg(not(feature = "emit_errors"))]
 /// Placeholder when error emission is disabled
 fn handle_error(_: &str) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_from_cot_advertises_protocol_version_1() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let cot = CursorOnTarget::new("test-uid", "a-f-G-U", tx);
+
+        let message = rpc_from_cot(&cot);
+        let control = message.tak_control.expect("tak_control should be set");
+        assert_eq!(control.min_proto_version, 1);
+        assert_eq!(control.max_proto_version, 1);
+    }
+
+    #[test]
+    fn rpc_from_cot_maps_position_and_accuracy_fields() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut cot = CursorOnTarget::new("test-uid", "a-f-G-U", tx);
+        cot.position = Some(Position {
+            lat: 51.5074,
+            lng: -0.1278,
+            hae: 42.0,
+            ce: 5.0,
+            le: 3.0,
+        });
+
+        let message = rpc_from_cot(&cot);
+        let event = message.cot_event.expect("cot_event should be set");
+        // Position uses `lng`, the wire format uses `lon` - make sure the rename lines up
+        assert_eq!(event.lat, 51.5074);
+        assert_eq!(event.lon, -0.1278);
+        assert_eq!(event.hae, 42.0);
+        assert_eq!(event.ce, 5.0);
+        assert_eq!(event.le, 3.0);
+    }
+
+    #[test]
+    fn rpc_from_cot_missing_position_reports_unknown_accuracy() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let cot = CursorOnTarget::new("test-uid", "a-f-G-U", tx);
+
+        let message = rpc_from_cot(&cot);
+        let event = message.cot_event.expect("cot_event should be set");
+        // No position set: lat/lon fall back to Null Island, but ce/le must signal
+        // "unknown accuracy" (9999999, the CoT convention) rather than "perfect fix"
+        // (0.0), which is how TAK/ATAK would otherwise render the position.
+        assert_eq!(event.lat, 0.0);
+        assert_eq!(event.lon, 0.0);
+        assert_eq!(event.ce, 9999999.0);
+        assert_eq!(event.le, 9999999.0);
+    }
+
+    #[test]
+    fn rpc_from_cot_computes_stale_time_from_stale_time_ms() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut cot = CursorOnTarget::new("test-uid", "a-f-G-U", tx);
+        cot.stale_time_ms = 5_000;
+
+        let message = rpc_from_cot(&cot);
+        let event = message.cot_event.expect("cot_event should be set");
+        assert_eq!(event.stale_time, event.send_time + 5_000);
+        assert_eq!(event.stale_time, event.start_time + 5_000);
+    }
+
+    #[test]
+    fn rpc_from_cot_maps_identity_and_contact_fields() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut cot = CursorOnTarget::new("test-uid", "a-f-G-U", tx);
+        cot.how = "m-g".into();
+        cot.set_contact(Some("CALLSIGN"), Some("192.168.1.1:4242:tcp"));
+
+        let message = rpc_from_cot(&cot);
+        let control = message.tak_control.expect("tak_control should be set");
+        let event = message.cot_event.expect("cot_event should be set");
+        let contact = event
+            .detail
+            .expect("detail should be set")
+            .contact
+            .expect("contact should be set");
+
+        assert_eq!(control.contact_uid, "test-uid");
+        assert_eq!(event.uid, "test-uid");
+        assert_eq!(event.r#type, "a-f-G-U");
+        assert_eq!(event.how, "m-g");
+        assert_eq!(contact.callsign, "CALLSIGN");
+        assert_eq!(contact.endpoint, "192.168.1.1:4242:tcp");
+    }
+}

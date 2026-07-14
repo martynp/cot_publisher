@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2021-2025 Martyn P <martyn@datasync.dev>
+// Copyright (c) 2021-2026 Martyn P <martyn@datasync.dev>
 
 //! This module provides a Cursor on Target (COT) message structure and related types.;
 
@@ -255,7 +255,9 @@ impl CursorOnTarget {
     /// Sets the basic position (latitude and longitude) for this COT entity
     ///
     /// If a position already exists, only the latitude and longitude are updated.
-    /// Otherwise, creates a new position with `hae`, `ce`, and `le` set to 0.0.
+    /// Otherwise, creates a new position with `hae` set to 0.0 and `ce`/`le` set to
+    /// 9999999.0 (the CoT convention for "accuracy unknown", rather than implying a
+    /// perfect fix).
     ///
     /// # Arguments
     ///
@@ -271,8 +273,8 @@ impl CursorOnTarget {
                 lat,
                 lng,
                 hae: 0.0,
-                ce: 0.0,
-                le: 0.0,
+                ce: 9999999.0,
+                le: 9999999.0,
             });
         }
     }
@@ -280,7 +282,9 @@ impl CursorOnTarget {
     /// Sets the altitude (height above ellipsoid) for this COT entity
     ///
     /// If a position already exists, only the altitude is updated.
-    /// Otherwise, creates a new position with `lat`, `lng`, `ce`, and `le` set to 0.0.
+    /// Otherwise, creates a new position with `lat`/`lng` set to 0.0 and `ce`/`le` set
+    /// to 9999999.0 (the CoT convention for "accuracy unknown", rather than implying a
+    /// perfect fix).
     ///
     /// # Arguments
     ///
@@ -294,8 +298,8 @@ impl CursorOnTarget {
                 lat: 0.0,
                 lng: 0.0,
                 hae,
-                ce: 0.0,
-                le: 0.0,
+                ce: 9999999.0,
+                le: 9999999.0,
             });
         }
     }
